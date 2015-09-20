@@ -23,8 +23,7 @@ CREATE SCHEMA pgp_metadata
 		session_id bigint not null,
 		round_id bigint not null,
 		min_proposal_id bigint not null,
-		proposer_name text not null,
-		proposer_port int not null,
+		proposer_id text not null,
 		accepted bool not null default false,
 		consensus bool not null default false,
 		value text
@@ -36,8 +35,7 @@ CREATE SCHEMA pgp_metadata
 DROP TYPE IF EXISTS prepare_response CASCADE;
 CREATE TYPE prepare_response AS (
 	promised boolean,
-	proposer_name text,
-	proposer_port int,
+	proposer_id text,
 	proposal_id bigint,
 	value text
 );
@@ -52,8 +50,7 @@ CREATE TYPE accept_response AS (
 
 -- 
 CREATE OR REPLACE FUNCTION paxos_request_prepare(
-								current_proposer_name text,
-								current_proposer_port int,
+								current_proposer_id text,
 								current_session_id bigint,
 								current_round_id bigint,
 								current_proposal_id bigint)
@@ -79,35 +76,30 @@ BEGIN
 				session_id,
 				round_id,
 				min_proposal_id,
-				proposer_name,
-				proposer_port)
+				proposer_id)
 		VALUES (current_session_id,
 				current_round_id,
 				current_proposal_id,
-				current_proposer_name,
-				current_proposer_port);
+				current_proposer_id);
 
-		SELECT true, current_proposer_name, current_proposer_port, current_proposal_id, NULL INTO response;
+		SELECT true, current_proposer_id, current_proposal_id, NULL INTO response;
 
 	ELSIF current_proposal_id > round.min_proposal_id OR
 		 (current_proposal_id = round.min_proposal_id AND
-		 (current_proposer_name > round.proposer_name OR
-		 (current_proposer_name = round.proposer_name AND current_proposer_port > round.proposer_port))) THEN
-
+		 (current_proposer_id > round.proposer_id)) THEN
 		-- I've seen a prepare request with a lower ID for this proposal
 
 		UPDATE pgp_metadata.round 
 		SET min_proposal_id = current_proposal_id,
-			proposer_name = current_proposer_name,
-			proposer_port = current_proposer_port
+			proposer_id = current_proposer_id
 		WHERE session_id = current_session_id AND round_id = current_round_id;
 
-		SELECT true, current_proposer_name, current_proposer_port, current_proposal_id, round.value INTO response;
+		SELECT true, current_proposer_id, current_proposal_id, round.value INTO response;
 
 	ELSE
 		-- I've seen a prepare request with a higher ID (or same) for this proposal
 
-		SELECT false, round.proposer_name, round.proposer_port, round.min_proposal_id, round.value INTO response;
+		SELECT false, round.proposer_id, round.min_proposal_id, round.value INTO response;
 	END IF;
 
 	RETURN response;
@@ -116,8 +108,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 -- Phase 2 of Paxos on the Acceptor
 CREATE OR REPLACE FUNCTION paxos_request_accept(
-							   current_proposer_name text,
-							   current_proposer_port integer,
+							   current_proposer_id text,
 							   current_session_id bigint,
 							   current_round_id bigint,
 							   current_proposal_id bigint,
@@ -141,8 +132,7 @@ BEGIN
 
 		RAISE EXCEPTION 'Unknown round';
 	ELSIF current_proposal_id = round.min_proposal_id AND
-		  current_proposer_name = round.proposer_name AND
-		  current_proposer_port = round.proposer_port THEN
+		  current_proposer_id = round.proposer_id THEN
 
 		-- I have indeed promised to participate in this proposal and accept it
 
@@ -164,8 +154,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 -- Learner functions
 CREATE OR REPLACE FUNCTION paxos_confirm_consensus(
-							current_proposer_name text,
-							current_proposer_port int,
+							current_proposer_id text,
 							current_session_id bigint,
 							current_round_id bigint,
 							accepted_proposal_id bigint,
@@ -179,7 +168,7 @@ BEGIN
 
 	-- No longer accept any new values and confirm consensus
 	UPDATE pgp_metadata.round
-	SET consensus = true, proposer_name = current_proposer_name, proposer_port = current_proposer_port, min_proposal_id = accepted_proposal_id, value = accepted_value
+	SET consensus = true, proposer_id = current_proposer_id, min_proposal_id = accepted_proposal_id, value = accepted_value
 	WHERE session_id = current_session_id
 	AND round_id = current_round_id;
 
@@ -209,8 +198,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 -- Primitive multi-paxos implementation
 CREATE OR REPLACE FUNCTION paxos_log(
-							proposer_name text,
-							proposer_port int,
+							proposer_id text,
 							current_session_id bigint,
 							proposed_value text)
 RETURNS void
@@ -236,8 +224,7 @@ BEGIN
 	WHILE NOT done LOOP
 		BEGIN
 			PERFORM paxos(
-							proposer_name,
-							proposer_port,
+							proposer_id,
 							current_session_id,
 							current_round_id,
 							proposed_value,
@@ -327,8 +314,7 @@ $BODY$ LANGUAGE 'plpgsql';
 -- Proposer functions
 
 CREATE OR REPLACE FUNCTION paxos(
-							proposer_name text,
-							proposer_port int,
+							proposer_id text,
 							current_session_id bigint,
 							current_round_id bigint,
 							proposed_value text DEFAULT NULL,
@@ -358,8 +344,7 @@ BEGIN
 
 	CREATE TEMPORARY TABLE IF NOT EXISTS prepare_responses (
 		promised boolean,
-		proposer_name text,
-		proposer_port int,
+		proposer_id text,
 		proposal_id bigint,
 		value text
 	);
@@ -383,8 +368,7 @@ BEGIN
 
 		-- Phase 1: prepare
 		INSERT INTO prepare_responses SELECT * FROM paxos_prepare(
-							proposer_name,
-							proposer_port,
+							proposer_id,
 							current_session_id,
 							current_round_id,
 							current_proposal_id);
@@ -415,12 +399,12 @@ BEGIN
 		END IF;
 
 		-- Find highest existing proposal
-		SELECT * INTO max_prepare_response FROM prepare_responses ORDER BY proposal_id DESC, proposer_name DESC, proposer_port DESC LIMIT 1;
+		SELECT * INTO max_prepare_response FROM prepare_responses ORDER BY proposal_id DESC, proposer_id DESC LIMIT 1;
 
 		IF NOT max_prepare_response.promised THEN
 			-- Another proposal with a higher ID exists
 			IF max_prepare_response.proposal_id = current_proposal_id AND current_proposal_id > 0 THEN
-				RAISE NOTICE 'competing with %:%, retrying after random back-off', max_prepare_response.proposer_name, max_prepare_response.proposer_port;
+				RAISE NOTICE 'competing with %, retrying after random back-off', max_prepare_response.proposer_id;
 				PERFORM pg_sleep(trunc(random() * (EXTRACT(EPOCH FROM clock_timestamp())-start_time))); 
 			END IF;
 
@@ -434,8 +418,7 @@ BEGIN
 
 		-- Phase 2: accept
 		INSERT INTO accept_responses SELECT * FROM paxos_accept(
-							proposer_name,
-							proposer_port,
+							proposer_id,
 							current_session_id,
 							current_round_id,
 							current_proposal_id,
@@ -506,8 +489,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_prepare(
-							proposer_name text,
-							proposer_port int,
+							proposer_id text,
 							current_session_id bigint,
 							current_round_id bigint,
 							current_proposal_id bigint)
@@ -517,9 +499,8 @@ DECLARE
 	prepare_query text;
 	host record;
 BEGIN
-	prepare_query := format('SELECT paxos_request_prepare(%s,%s,%s,%s,%s)',
-							quote_literal(proposer_name),
-							proposer_port,
+	prepare_query := format('SELECT paxos_request_prepare(%s,%s,%s,%s)',
+							quote_literal(proposer_id),
 							current_session_id,
 							current_round_id,
 							current_proposal_id);
@@ -538,8 +519,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_accept(
-							proposer_name text,
-							proposer_port int,
+							proposer_id text,
 							current_session_id bigint,
 							current_round_id bigint,
 							current_proposal_id bigint,
@@ -550,9 +530,8 @@ DECLARE
 	accept_query text;
 	host record;
 BEGIN
-	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s,%s)',
-							quote_literal(proposer_name),
-							proposer_port,
+	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s)',
+							quote_literal(proposer_id),
 							current_session_id,
 							current_round_id,
 							current_proposal_id,
