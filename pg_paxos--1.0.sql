@@ -4,6 +4,11 @@ DROP SCHEMA IF EXISTS pgp_metadata CASCADE;
 
 CREATE SCHEMA pgp_metadata
 
+	-- Stores session metadata (e.g. current leader)
+	CREATE TABLE "session" (
+		session_id bigint not null primary key
+	)
+
 	-- Stores the send of hosts for each session and in which round the host joined/left
 	CREATE TABLE "hosts" (
 		session_id bigint not null,
@@ -11,11 +16,6 @@ CREATE SCHEMA pgp_metadata
 		node_port int not null,
 		min_round_id bigint not null,
 		max_round_id bigint
-	)
-
-	-- Stores session metadata (e.g. current leader)
-	CREATE TABLE "session" (
-		session_id bigint not null primary key
 	)
 
 	-- Stores round metadata necessary for Paxos 
@@ -27,6 +27,13 @@ CREATE SCHEMA pgp_metadata
 		accepted bool not null default false,
 		consensus bool not null default false,
 		value text
+	)
+
+	-- Stores which tables are managed by pg_paxos and the session ID
+	CREATE TABLE "replicated_tables"
+		schema_name text not null,
+		table_name text not null,
+		session_id bigint not null
 	)
 
 	CREATE INDEX round_id_index ON round (session_id, round_id)
