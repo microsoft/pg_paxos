@@ -175,7 +175,10 @@ BEGIN
 
 	-- No longer accept any new values and confirm consensus
 	UPDATE pgp_metadata.round
-	SET consensus = true, proposer_id = current_proposer_id, min_proposal_id = accepted_proposal_id, value = accepted_value
+	SET consensus = true,
+		proposer_id = current_proposer_id,
+		min_proposal_id = accepted_proposal_id,
+		value = accepted_value
 	WHERE group_id = current_group_id
 	AND round_id = current_round_id;
 
@@ -270,7 +273,8 @@ BEGIN
 	PERFORM paxos_broadcast_query(round_query);
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
-		SELECT resp INTO remote_round_id FROM dblink_get_result(host.connection_name) AS (resp int);
+		SELECT resp INTO remote_round_id
+		FROM dblink_get_result(host.connection_name) AS (resp int);
 
 		IF remote_round_id > highest_round_id THEN
 			highest_round_id := remote_round_id;
@@ -298,7 +302,8 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 -- Get the highest round number which can be locally committed
-CREATE OR REPLACE FUNCTION paxos_highest_consensus_round(group_id bigint) RETURNS bigint AS
+CREATE OR REPLACE FUNCTION paxos_highest_consensus_round(group_id bigint)
+RETURNS bigint AS
 $BODY$
 DECLARE
 	end_range bigint;
@@ -411,7 +416,9 @@ BEGIN
 		END IF;
 
 		-- Find highest existing proposal
-		SELECT * INTO max_prepare_response FROM prepare_responses ORDER BY proposal_id DESC, proposer_id DESC LIMIT 1;
+		SELECT * INTO max_prepare_response
+		FROM prepare_responses
+		ORDER BY proposal_id DESC, proposer_id DESC LIMIT 1;
 
 		IF NOT max_prepare_response.promised THEN
 			-- Another proposal with a higher ID exists
@@ -518,7 +525,8 @@ BEGIN
 	PERFORM paxos_broadcast_query(prepare_query);
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
-		RETURN QUERY SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp prepare_response);
+		RETURN QUERY
+		SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp prepare_response);
 
 		-- Need to call get_result again to clear the connection
 		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp prepare_response);
@@ -550,7 +558,8 @@ BEGIN
 	PERFORM paxos_broadcast_query(accept_query);
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
-		RETURN QUERY SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp accept_response);
+		RETURN QUERY
+		SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp accept_response);
 
 		-- Need to call get_result again to clear the connection
 		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp accept_response);
