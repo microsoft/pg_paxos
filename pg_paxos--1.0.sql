@@ -679,7 +679,12 @@ DECLARE
 	host record;
 BEGIN
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
-		PERFORM dblink_send_query(host.connection_name, query_string);
+		BEGIN
+			PERFORM dblink_send_query(host.connection_name, query_string);
+		EXCEPTION WHEN OTHERS THEN
+			PERFORM dblink_disconnect(host.connection_name);
+			UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
+		END;
 	END LOOP;
 END;
 $BODY$ LANGUAGE 'plpgsql';
