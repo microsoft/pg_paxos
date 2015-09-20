@@ -4,14 +4,14 @@ DROP SCHEMA IF EXISTS pgp_metadata CASCADE;
 
 CREATE SCHEMA pgp_metadata
 
-	-- Stores session metadata (e.g. current leader)
-	CREATE TABLE "session" (
-		session_id bigint not null primary key
+	-- Stores group metadata (e.g. current leader)
+	CREATE TABLE "group" (
+		group_id bigint not null primary key
 	)
 
-	-- Stores the send of hosts for each session and in which round the host joined/left
+	-- Stores the hosts for each group and in which round the host joined/left
 	CREATE TABLE "hosts" (
-		session_id bigint not null,
+		group_id bigint not null,
 		node_name text not null,
 		node_port int not null,
 		min_round_id bigint not null,
@@ -20,7 +20,7 @@ CREATE SCHEMA pgp_metadata
 
 	-- Stores round metadata necessary for Paxos 
 	CREATE TABLE "round" (
-		session_id bigint not null,
+		group_id bigint not null,
 		round_id bigint not null,
 		min_proposal_id bigint not null,
 		proposer_id text not null,
@@ -29,14 +29,14 @@ CREATE SCHEMA pgp_metadata
 		value text
 	)
 
-	-- Stores which tables are managed by pg_paxos and the session ID
+	-- Stores which tables are managed by pg_paxos and the group ID
 	CREATE TABLE "replicated_tables"
 		schema_name text not null,
 		table_name text not null,
-		session_id bigint not null
+		group_id bigint not null
 	)
 
-	CREATE INDEX round_id_index ON round (session_id, round_id)
+	CREATE INDEX round_id_index ON round (group_id, round_id)
 	CREATE SEQUENCE proposer_id_sequence NO CYCLE;
 
 DROP TYPE IF EXISTS prepare_response CASCADE;
@@ -58,7 +58,7 @@ CREATE TYPE accept_response AS (
 -- 
 CREATE OR REPLACE FUNCTION paxos_request_prepare(
 								current_proposer_id text,
-								current_session_id bigint,
+								current_group_id bigint,
 								current_round_id bigint,
 								current_proposal_id bigint)
 RETURNS prepare_response
@@ -73,18 +73,18 @@ BEGIN
 	-- Get state of the current round
 	SELECT * INTO round
 	FROM pgp_metadata.round
-	WHERE session_id = current_session_id AND round_id = current_round_id;
+	WHERE group_id = current_group_id AND round_id = current_round_id;
 
 	IF NOT FOUND THEN
 
 		-- I've not seen a prepare request for this proposal
 
 		INSERT INTO pgp_metadata.round (
-				session_id,
+				group_id,
 				round_id,
 				min_proposal_id,
 				proposer_id)
-		VALUES (current_session_id,
+		VALUES (current_group_id,
 				current_round_id,
 				current_proposal_id,
 				current_proposer_id);
@@ -99,7 +99,7 @@ BEGIN
 		UPDATE pgp_metadata.round 
 		SET min_proposal_id = current_proposal_id,
 			proposer_id = current_proposer_id
-		WHERE session_id = current_session_id AND round_id = current_round_id;
+		WHERE group_id = current_group_id AND round_id = current_round_id;
 
 		SELECT true, current_proposer_id, current_proposal_id, round.value INTO response;
 
@@ -116,7 +116,7 @@ $BODY$ LANGUAGE 'plpgsql';
 -- Phase 2 of Paxos on the Acceptor
 CREATE OR REPLACE FUNCTION paxos_request_accept(
 							   current_proposer_id text,
-							   current_session_id bigint,
+							   current_group_id bigint,
 							   current_round_id bigint,
 							   current_proposal_id bigint,
 							   proposed_value text)
@@ -132,7 +132,7 @@ BEGIN
 	-- Get the state of the current round
 	SELECT * INTO round
 	FROM pgp_metadata.round
-	WHERE session_id = current_session_id AND round_id = current_round_id;
+	WHERE group_id = current_group_id AND round_id = current_round_id;
 
 	IF NOT FOUND THEN
 		-- I have not seen a prepare request for this proposal
@@ -145,7 +145,7 @@ BEGIN
 
 		UPDATE pgp_metadata.round
 		SET "value" = proposed_value, "accepted" = true
-		WHERE session_id = current_session_id AND round_id = current_round_id;
+		WHERE group_id = current_group_id AND round_id = current_round_id;
 
 		SELECT true, current_proposal_id INTO response;
 	ELSE
@@ -162,7 +162,7 @@ $BODY$ LANGUAGE 'plpgsql';
 -- Learner functions
 CREATE OR REPLACE FUNCTION paxos_confirm_consensus(
 							current_proposer_id text,
-							current_session_id bigint,
+							current_group_id bigint,
 							current_round_id bigint,
 							accepted_proposal_id bigint,
 							accepted_value text)
@@ -176,7 +176,7 @@ BEGIN
 	-- No longer accept any new values and confirm consensus
 	UPDATE pgp_metadata.round
 	SET consensus = true, proposer_id = current_proposer_id, min_proposal_id = accepted_proposal_id, value = accepted_value
-	WHERE session_id = current_session_id
+	WHERE group_id = current_group_id
 	AND round_id = current_round_id;
 
 	RETURN true;
@@ -185,7 +185,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 -- Returns the state of the given range of rounds
-CREATE OR REPLACE FUNCTION paxos_copy_state(current_session_id bigint,
+CREATE OR REPLACE FUNCTION paxos_copy_state(current_group_id bigint,
 							 start_round_id bigint,
 							 end_round_id bigint)
 RETURNS SETOF record
@@ -194,7 +194,7 @@ AS $BODY$
 	BEGIN
 		RETURN QUERY 
 		SELECT * FROM pgp_metadata.round
-		WHERE session_id = current_session_id
+		WHERE group_id = current_group_id
 		AND round_id >= start_round_id
 		AND round_id <= end_round_id 
 		AND consensus = true;
@@ -206,7 +206,7 @@ $BODY$ LANGUAGE 'plpgsql';
 -- Primitive multi-paxos implementation
 CREATE OR REPLACE FUNCTION paxos_log(
 							proposer_id text,
-							current_session_id bigint,
+							current_group_id bigint,
 							proposed_value text)
 RETURNS void
 AS $BODY$
@@ -218,7 +218,7 @@ BEGIN
 	-- a majority of nodes meaning at least 1 higher than any round ID on which
 	-- consensus was reached. Since I'll use the same nodes as acceptors,
 	-- I have a good chance of getting my proposal accepted.
-	SELECT paxos_new_round_id(current_session_id) INTO current_round_id;
+	SELECT paxos_new_round_id(current_group_id) INTO current_round_id;
 
 	-- Another node could be using the same or higher round ID, but
 	-- if that node reaches consensus on its value for that round we 
@@ -232,7 +232,7 @@ BEGIN
 		BEGIN
 			PERFORM paxos(
 							proposer_id,
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							proposed_value,
 							true);
@@ -249,7 +249,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_new_round_id(
-							current_session_id bigint)
+							current_group_id bigint)
 RETURNS bigint
 AS $BODY$
 DECLARE
@@ -261,11 +261,11 @@ DECLARE
 	host record;
 BEGIN
 	-- Set up connections
-	PERFORM paxos_init_session(current_session_id);
+	PERFORM paxos_init_group(current_group_id);
 	
 	-- Ask majority for highest local round
 	round_query := format('SELECT paxos_highest_local_round(%s)',
-			      current_session_id);
+			      current_group_id);
 
 	PERFORM paxos_broadcast_query(round_query);
 
@@ -285,7 +285,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_highest_local_round(session_id bigint)
+CREATE OR REPLACE FUNCTION paxos_highest_local_round(group_id bigint)
 RETURNS bigint AS
 $BODY$
 DECLARE
@@ -298,7 +298,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 -- Get the highest round number which can be locally committed
-CREATE OR REPLACE FUNCTION paxos_highest_consensus_round(session_id bigint) RETURNS bigint AS
+CREATE OR REPLACE FUNCTION paxos_highest_consensus_round(group_id bigint) RETURNS bigint AS
 $BODY$
 DECLARE
 	end_range bigint;
@@ -322,7 +322,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 CREATE OR REPLACE FUNCTION paxos(
 							proposer_id text,
-							current_session_id bigint,
+							current_group_id bigint,
 							current_round_id bigint,
 							proposed_value text DEFAULT NULL,
 							fail_on_change boolean DEFAULT false)
@@ -346,7 +346,7 @@ DECLARE
 BEGIN
 
 	-- Snapshot of hosts to use
-	SELECT paxos_find_hosts(current_session_id) INTO num_hosts;
+	SELECT paxos_find_hosts(current_group_id) INTO num_hosts;
 
 	majority_size = num_hosts / 2 + 1;
 
@@ -377,7 +377,7 @@ BEGIN
 		-- Phase 1: prepare
 		INSERT INTO prepare_responses SELECT * FROM paxos_prepare(
 							proposer_id,
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							current_proposal_id);
 
@@ -438,7 +438,7 @@ BEGIN
 		-- Phase 2: accept
 		INSERT INTO accept_responses SELECT * FROM paxos_accept(
 							proposer_id,
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							current_proposal_id,
 							proposed_value);
@@ -477,7 +477,7 @@ BEGIN
 
 	-- I now know consensus was reached, inform acceptors of this discovery
 	PERFORM paxos_inform_learners(
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							proposed_value);
 
@@ -500,7 +500,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 CREATE OR REPLACE FUNCTION paxos_prepare(
 							proposer_id text,
-							current_session_id bigint,
+							current_group_id bigint,
 							current_round_id bigint,
 							current_proposal_id bigint)
 RETURNS SETOF prepare_response
@@ -511,7 +511,7 @@ DECLARE
 BEGIN
 	prepare_query := format('SELECT paxos_request_prepare(%s,%s,%s,%s)',
 							quote_literal(proposer_id),
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							current_proposal_id);
 
@@ -530,7 +530,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 CREATE OR REPLACE FUNCTION paxos_accept(
 							proposer_id text,
-							current_session_id bigint,
+							current_group_id bigint,
 							current_round_id bigint,
 							current_proposal_id bigint,
 							proposed_value text)
@@ -542,7 +542,7 @@ DECLARE
 BEGIN
 	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s)',
 							quote_literal(proposer_id),
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							current_proposal_id,
 							quote_literal(proposed_value));
@@ -560,7 +560,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_inform_learners(
-							current_session_id bigint,
+							current_group_id bigint,
 							current_round_id bigint,
 							proposed_value text)
 RETURNS void
@@ -571,7 +571,7 @@ DECLARE
 BEGIN
 	-- For now, only acceptors are learners to avoid re-connecting to failed nodes
 	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s)',
-							current_session_id,
+							current_group_id,
 							current_round_id,
 							quote_literal(proposed_value));
 
@@ -587,8 +587,8 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_init_session(
-							current_session_id bigint)
+CREATE OR REPLACE FUNCTION paxos_init_group(
+							current_group_id bigint)
 RETURNS int
 AS $BODY$
 DECLARE
@@ -598,8 +598,8 @@ DECLARE
 	round_query text;
 	host record;
 BEGIN
-	-- Find the hosts for the current session
-	SELECT paxos_find_hosts(current_session_id) INTO num_hosts;
+	-- Find the hosts for the current group
+	SELECT paxos_find_hosts(current_group_id) INTO num_hosts;
 
 	majority_size = num_hosts / 2 + 1;
 
@@ -617,7 +617,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_find_hosts(
-							current_session_id bigint)
+							current_group_id bigint)
 RETURNS int
 AS $BODY$
 DECLARE
@@ -637,7 +637,7 @@ BEGIN
 		INSERT INTO hosts
 		SELECT format('%s:%s', node_name, node_port) AS connection_name, node_name, node_port, false AS connected, true AS participating
 		FROM pgp_metadata.hosts 
-		WHERE session_id = current_session_id;
+		WHERE group_id = current_group_id;
 
 	END IF;
 
