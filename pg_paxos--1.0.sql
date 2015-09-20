@@ -30,7 +30,7 @@ CREATE SCHEMA pgp_metadata
 	)
 
 	CREATE INDEX round_id_index ON round (session_id, round_id)
-	CREATE SEQUENCE value_id_sequence NO CYCLE;
+	CREATE SEQUENCE proposer_id_sequence NO CYCLE;
 
 DROP TYPE IF EXISTS prepare_response CASCADE;
 CREATE TYPE prepare_response AS (
@@ -331,6 +331,7 @@ DECLARE
 	num_accept_responses int;
 	max_accept_response accept_response;
 	num_accepted int;
+	accepted_proposer_id text;
 	accepted_value text;
 	start_time double precision := extract(EPOCH FROM clock_timestamp());
 	value_changed boolean := false;
@@ -385,10 +386,14 @@ BEGIN
 		END IF;
 
 		-- Find whether consensus was already reached
-		SELECT value INTO accepted_value FROM prepare_responses WHERE value IS NOT NULL GROUP BY value HAVING count(*) >= majority_size;
+		SELECT proposer_id, value INTO accepted_proposer_id, accepted_value
+		FROM prepare_responses
+		WHERE value IS NOT NULL
+		GROUP BY value
+		HAVING count(*) >= majority_size;
 
 		IF FOUND THEN
-			IF fail_on_change THEN
+			IF fail_on_change AND accepted_proposer_id <> proposer_id THEN
 				PERFORM paxos_close_connections();
 				RAISE SQLSTATE '19980' USING message = 'consensus has previously been reached on another value';
 			ELSE 
@@ -413,7 +418,14 @@ BEGIN
 		ELSIF max_prepare_response.value IS NOT NULL THEN
 			RAISE NOTICE 'proposing previously accepted value: %', max_prepare_response.value;
 			proposed_value := max_prepare_response.value;
-			value_changed := true;
+
+			IF max_prepare_response.proposer_id <> proposer_id THEN
+				-- I use a value from a different proposer
+				value_changed := true;
+			ELSE
+				-- I use my own value, which was previously accepted
+				value_changed := false;
+			END IF;
 		END IF;
 
 		-- Phase 2: accept
@@ -471,15 +483,6 @@ BEGIN
 	IF value_changed AND fail_on_change THEN
 		-- We reached consensus and a value on which there was no consensus
 		-- yet, but from a different proposal.
-
-		-- There is a slight issue here, what if I changed back to my original
-		-- value because I got it back from a node to which I had previously
-		-- sent a request_accept, without being able to get a majority.
-		-- In that case, I might try to run Paxos again while consensus was
-		-- reached on my value. The way to solve this would be to have some
-		-- unique value ID, such that I can determine whether the value was
-		-- from this call to paxos.
-
 		RAISE 'consensus was reached on a different value: %s', proposed_value;
 	END IF;
 
