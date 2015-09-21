@@ -30,7 +30,7 @@ CREATE SCHEMA pgp_metadata
 	)
 
 	-- Stores which tables are managed by pg_paxos and the group ID
-	CREATE TABLE "replicated_tables"
+	CREATE TABLE "replicated_tables" (
 		schema_name text not null,
 		table_name text not null,
 		group_id bigint not null
@@ -326,7 +326,7 @@ $BODY$ LANGUAGE 'plpgsql';
 -- Proposer functions
 
 CREATE OR REPLACE FUNCTION paxos(
-							proposer_id text,
+							current_proposer_id text,
 							current_group_id bigint,
 							current_round_id bigint,
 							proposed_value text DEFAULT NULL,
@@ -381,7 +381,7 @@ BEGIN
 
 		-- Phase 1: prepare
 		INSERT INTO prepare_responses SELECT * FROM paxos_prepare(
-							proposer_id,
+							current_proposer_id,
 							current_group_id,
 							current_round_id,
 							current_proposal_id);
@@ -401,11 +401,11 @@ BEGIN
 		SELECT proposer_id, value INTO accepted_proposer_id, accepted_value
 		FROM prepare_responses
 		WHERE value IS NOT NULL
-		GROUP BY value
+		GROUP BY proposer_id, value
 		HAVING count(*) >= majority_size;
 
 		IF FOUND THEN
-			IF fail_on_change AND accepted_proposer_id <> proposer_id THEN
+			IF fail_on_change AND accepted_proposer_id <> current_proposer_id THEN
 				PERFORM paxos_close_connections();
 				RAISE SQLSTATE '19980' USING message = 'consensus has previously been reached on another value';
 			ELSE 
@@ -433,7 +433,7 @@ BEGIN
 			RAISE NOTICE 'proposing previously accepted value: %', max_prepare_response.value;
 			proposed_value := max_prepare_response.value;
 
-			IF max_prepare_response.proposer_id <> proposer_id THEN
+			IF max_prepare_response.proposer_id <> current_proposer_id THEN
 				-- I use a value from a different proposer
 				value_changed := true;
 			ELSE
@@ -444,7 +444,7 @@ BEGIN
 
 		-- Phase 2: accept
 		INSERT INTO accept_responses SELECT * FROM paxos_accept(
-							proposer_id,
+							current_proposer_id,
 							current_group_id,
 							current_round_id,
 							current_proposal_id,
@@ -484,8 +484,10 @@ BEGIN
 
 	-- I now know consensus was reached, inform acceptors of this discovery
 	PERFORM paxos_inform_learners(
+							current_proposer_id,
 							current_group_id,
 							current_round_id,
+							current_proposal_id,
 							proposed_value);
 
 	PERFORM paxos_close_connections();
@@ -506,7 +508,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_prepare(
-							proposer_id text,
+							current_proposer_id text,
 							current_group_id bigint,
 							current_round_id bigint,
 							current_proposal_id bigint)
@@ -517,7 +519,7 @@ DECLARE
 	host record;
 BEGIN
 	prepare_query := format('SELECT paxos_request_prepare(%s,%s,%s,%s)',
-							quote_literal(proposer_id),
+							quote_literal(current_proposer_id),
 							current_group_id,
 							current_round_id,
 							current_proposal_id);
@@ -537,7 +539,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_accept(
-							proposer_id text,
+							current_proposer_id text,
 							current_group_id bigint,
 							current_round_id bigint,
 							current_proposal_id bigint,
@@ -549,7 +551,7 @@ DECLARE
 	host record;
 BEGIN
 	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s)',
-							quote_literal(proposer_id),
+							quote_literal(current_proposer_id),
 							current_group_id,
 							current_round_id,
 							current_proposal_id,
@@ -569,8 +571,10 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE OR REPLACE FUNCTION paxos_inform_learners(
+							current_proposer_id text,
 							current_group_id bigint,
 							current_round_id bigint,
+							current_proposal_id bigint,
 							proposed_value text)
 RETURNS void
 AS $BODY$
@@ -579,9 +583,11 @@ DECLARE
 	host record;
 BEGIN
 	-- For now, only acceptors are learners to avoid re-connecting to failed nodes
-	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s)',
+	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s,%s,%s)',
+							quote_literal(current_proposer_id),
 							current_group_id,
 							current_round_id,
+							current_proposal_id,
 							quote_literal(proposed_value));
 
 	PERFORM paxos_broadcast_query(confirm_query);
