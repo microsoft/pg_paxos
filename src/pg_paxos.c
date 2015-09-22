@@ -56,10 +56,6 @@ static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
 static bool IsPgPaxosQuery(QueryDesc *queryDesc);
 static char *DeterminePaxosGroup(QueryDesc *queryDesc);
 static char* GenerateProposerId(void);
-static void PgPaxosProcessUtility(Node *parsetree, const char *queryString,
-								  ProcessUtilityContext context, ParamListInfo params,
-								  DestReceiver *dest, char *completionTag);
-static void ErrorOnDropIfPaxosTablesExist(DropStmt *dropStatement);
 static void FinishPaxosTransaction(XactEvent event, void *arg);
 
 /* declarations for dynamic loading */
@@ -68,7 +64,6 @@ PG_MODULE_MAGIC;
 
 /* saved hook values in case of unload */
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
-static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
 
 /*
@@ -81,9 +76,6 @@ _PG_init(void)
 {
 	PreviousExecutorStartHook = ExecutorStart_hook;
 	ExecutorStart_hook = PgPaxosExecutorStart;
-
-	PreviousProcessUtilityHook = ProcessUtility_hook;
-	ProcessUtility_hook = PgPaxosProcessUtility;
 
 	DefineCustomStringVariable("pg_paxos.node_id",
 							   "Unique node ID to use in Paxos interactions", NULL,
@@ -99,7 +91,6 @@ _PG_init(void)
 void
 _PG_fini(void)
 {
-	ProcessUtility_hook = PreviousProcessUtilityHook;
 	ExecutorStart_hook = PreviousExecutorStartHook;
 
 	RegisterXactCallback(FinishPaxosTransaction, NULL);
@@ -214,8 +205,8 @@ IsPgPaxosQuery(QueryDesc *queryDesc)
 
 
 /*
- * DeterminePaxosGroup determines the paxos group for the given list of
- * tables. If more than one Paxos group is used, this function errors out.
+ * DeterminePaxosGroup determines the paxos group for the given query.
+ * If more than one Paxos group is used, this function errors out.
  */
 static char *
 DeterminePaxosGroup(QueryDesc *queryDesc)
@@ -251,6 +242,11 @@ DeterminePaxosGroup(QueryDesc *queryDesc)
 }
 
 
+/*
+ * GenerateProposerId attempts to generate a globally unique proposer ID.
+ * It mainly relies on the pg_paxos.node_id setting to distinguish hosts,
+ * and appends the process ID and transaction ID to ensure local uniqueness.
+ */
 static char*
 GenerateProposerId(void)
 {
@@ -269,98 +265,9 @@ GenerateProposerId(void)
 
 
 /*
- * PgPaxosProcessUtility intercepts utility statements and errors out for
- * unsupported utility statements on paxos tables.
+ * FinishPaxosTransaction is called at the end of a transaction and
+ * mainly serves to reset the PaxosEnabled flag in case of failure.
  */
-static void
-PgPaxosProcessUtility(Node *parsetree, const char *queryString,
-					  ProcessUtilityContext context, ParamListInfo params,
-					  DestReceiver *dest, char *completionTag)
-{
-	NodeTag statementType = nodeTag(parsetree);
-	if (statementType == T_DropStmt)
-	{
-		DropStmt *dropStatement = (DropStmt *) parsetree;
-		ErrorOnDropIfPaxosTablesExist(dropStatement);
-	}
-
-	if (PreviousProcessUtilityHook != NULL)
-	{
-		PreviousProcessUtilityHook(parsetree, queryString, context,
-								   params, dest, completionTag);
-	}
-	else
-	{
-		standard_ProcessUtility(parsetree, queryString, context,
-								params, dest, completionTag);
-	}
-}
-
-
-/*
- * ErrorOnDropIfPaxosTablesExist prevents attempts to drop the pg_paxos§
- * extension if any paxos tables still exist. This prevention will be
- * circumvented if the user includes the CASCADE option in their DROP command,
- * in which case a notice is printed and the DROP is allowed to proceed.
- */
-static void
-ErrorOnDropIfPaxosTablesExist(DropStmt *dropStatement)
-{
-	Oid extensionOid = InvalidOid;
-	bool missingOK = true;
-	ListCell *dropStatementObject = NULL;
-	bool paxosTablesExist = false;
-
-	/* we're only worried about dropping extensions */
-	if (dropStatement->removeType != OBJECT_EXTENSION)
-	{
-		return;
-	}
-
-	extensionOid = get_extension_oid(PG_PAXOS_EXTENSION_NAME, missingOK);
-	if (extensionOid == InvalidOid)
-	{
-		/*
-		 * Exit early if the extension has not been created (CREATE EXTENSION).
-		 * This check is required because it's possible to load the hooks in an
-		 * extension without formally "creating" it.
-		 */
-		return;
-	}
-
-	/* nothing to do if no paxos tables are present */
-	paxosTablesExist = PaxosTablesExist();
-	if (!paxosTablesExist)
-	{
-		return;
-	}
-
-	foreach(dropStatementObject, dropStatement->objects)
-	{
-		List *objectNameList = lfirst(dropStatementObject);
-		char *objectName = NameListToString(objectNameList);
-
-		/* we're only concerned with the pg_paxos extension */
-		if (strncmp(PG_PAXOS_EXTENSION_NAME, objectName, NAMEDATALEN) != 0)
-		{
-			continue;
-		}
-
-		if (dropStatement->behavior != DROP_CASCADE)
-		{
-			/* without CASCADE, error if paxos tables present */
-			ereport(ERROR, (errcode(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
-							errmsg("cannot drop extension " PG_PAXOS_EXTENSION_NAME
-								   " because other objects depend on it"),
-							errdetail("Existing paxos tables depend on extension "
-									  PG_PAXOS_EXTENSION_NAME),
-							errhint("Use DROP ... CASCADE to drop the dependent "
-									"objects too.")));
-		}
-	}
-}
-
-
 static void
 FinishPaxosTransaction(XactEvent event, void *arg)
 {
