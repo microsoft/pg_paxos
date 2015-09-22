@@ -1,9 +1,10 @@
 /*-------------------------------------------------------------------------
  *
- * src/pg_shard.c
+ * src/pg_paxos.c
  *
- * This file contains functions to perform paxos planning and execution of
- * paxos tables.
+ * This file contains executor hooks that use the Paxos API to do
+ * replicated writes and consistent reads on PostgreSQL tables that are
+ * replicated across multiple nodes.
  *
  * Copyright (c) 2014-2015, Citus Data, Inc.
  *
