@@ -49,15 +49,12 @@ static char *PaxosNodeId = NULL;
 /* whether writes go through Paxos */
 static bool PaxosEnabled = true;
 
+
 /* executor functions forward declarations */
 static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
-static void PgPaxosExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count);
-static void PgPaxosExecutorFinish(QueryDesc *queryDesc);
-static void PgPaxosExecutorEnd(QueryDesc *queryDesc);
 static bool IsPgPaxosQuery(QueryDesc *queryDesc);
 static char *DeterminePaxosGroup(QueryDesc *queryDesc);
 static char* GenerateProposerId(void);
-static void NextExecutorStartHook(QueryDesc *queryDesc, int eflags);
 static void PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 								  ProcessUtilityContext context, ParamListInfo params,
 								  DestReceiver *dest, char *completionTag);
@@ -70,9 +67,6 @@ PG_MODULE_MAGIC;
 
 /* saved hook values in case of unload */
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
-static ExecutorRun_hook_type PreviousExecutorRunHook = NULL;
-static ExecutorFinish_hook_type PreviousExecutorFinishHook = NULL;
-static ExecutorEnd_hook_type PreviousExecutorEndHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
 
@@ -87,21 +81,9 @@ _PG_init(void)
 	PreviousExecutorStartHook = ExecutorStart_hook;
 	ExecutorStart_hook = PgPaxosExecutorStart;
 
-	PreviousExecutorRunHook = ExecutorRun_hook;
-	ExecutorRun_hook = PgPaxosExecutorRun;
-
-	PreviousExecutorFinishHook = ExecutorFinish_hook;
-	ExecutorFinish_hook = PgPaxosExecutorFinish;
-
-	PreviousExecutorEndHook = ExecutorEnd_hook;
-	ExecutorEnd_hook = PgPaxosExecutorEnd;
-
 	PreviousProcessUtilityHook = ProcessUtility_hook;
 	ProcessUtility_hook = PgPaxosProcessUtility;
 
-	ExecutorRun_hook = PreviousExecutorRunHook;
-	ExecutorFinish_hook = PreviousExecutorFinishHook;
-	ExecutorEnd_hook = PreviousExecutorEndHook;
 	DefineCustomStringVariable("pg_paxos.node_id",
 							   "Unique node ID to use in Paxos interactions", NULL,
 							   &PaxosNodeId, NULL, PGC_USERSET, 0, NULL,
@@ -118,9 +100,6 @@ _PG_fini(void)
 {
 	ProcessUtility_hook = PreviousProcessUtilityHook;
 	ExecutorStart_hook = PreviousExecutorStartHook;
-	ExecutorRun_hook = PreviousExecutorRunHook;
-	ExecutorFinish_hook = PreviousExecutorFinishHook;
-	ExecutorEnd_hook = PreviousExecutorEndHook;
 
 	RegisterXactCallback(FinishPaxosTransaction, NULL);
 }
@@ -152,10 +131,20 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 
 		if (isWrite)
 		{
+			/*
+ 			 * Log the current query through Paxos. In the future, we will want to
+ 			 * separately log a commit record, since we'd prefer not logging queries
+ 			 * that fail.
+ 			 */
 			syncRoundId = PaxosLog(groupId, proposerId, sqlQuery) - 1;
 			CommandCounterIncrement();
 		}
 	
+		/*
+		 * The PaxosApplyLog function will apply all SQL queries in the log
+		 * on which there is consensus, except the current query (hence the
+		 * minus 1 above). 
+		 */
 		PaxosEnabled = false;
 		PaxosApplyLog(groupId, proposerId, syncRoundId);
 		PaxosEnabled = true;
@@ -163,6 +152,10 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 
 		if (isWrite)
 		{
+			/* 
+			 * Mark the current query as applied and let the regular executor handle
+			 * it. This change be rolled back if the current query fails.
+			 */
 			PaxosSetApplied(groupId, syncRoundId + 1);
 			CommandCounterIncrement();
 		}
@@ -170,7 +163,15 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		queryDesc->snapshot->curcid = GetCurrentCommandId(false);
 	}
 
-	NextExecutorStartHook(queryDesc, eflags);
+	/* call into the standard executor start, or hook if set */
+	if (PreviousExecutorStartHook != NULL)
+	{
+		PreviousExecutorStartHook(queryDesc, eflags);
+	}
+	else
+	{
+		standard_ExecutorStart(queryDesc, eflags);
+	}
 }
 
 
@@ -267,26 +268,6 @@ GenerateProposerId(void)
 
 
 /*
- * NextExecutorStartHook simply encapsulates the common logic of calling the
- * next executor start hook in the chain or the standard executor start hook
- * if no other hooks are present.
- */
-static void
-NextExecutorStartHook(QueryDesc *queryDesc, int eflags)
-{
-	/* call into the standard executor start, or hook if set */
-	if (PreviousExecutorStartHook != NULL)
-	{
-		PreviousExecutorStartHook(queryDesc, eflags);
-	}
-	else
-	{
-		standard_ExecutorStart(queryDesc, eflags);
-	}
-}
-
-
-/*
  * PgPaxosProcessUtility intercepts utility statements and errors out for
  * unsupported utility statements on paxos tables.
  */
@@ -374,93 +355,6 @@ ErrorOnDropIfPaxosTablesExist(DropStmt *dropStatement)
 									  PG_PAXOS_EXTENSION_NAME),
 							errhint("Use DROP ... CASCADE to drop the dependent "
 									"objects too.")));
-		}
-	}
-}
-
-
-/*
- * PgPaxosExecutorRun
- */
-static void
-PgPaxosExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
-{
-	if (PaxosEnabled && IsPgPaxosQuery(queryDesc))
-	{
-		EState *estate = queryDesc->estate;
-		MemoryContext oldContext = NULL;
-
-		oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
-		estate->es_processed = 0;
-
-		MemoryContextSwitchTo(oldContext);
-	}
-	else
-	{
-		/* this isn't a query pg_shard handles: use previous hook or standard */
-		if (PreviousExecutorRunHook != NULL)
-		{
-			PreviousExecutorRunHook(queryDesc, direction, count);
-		}
-		else
-		{
-			standard_ExecutorRun(queryDesc, direction, count);
-		}
-	}
-
-}
-
-
-/*
- * PgPaxosExecutorFinish cleans up after a replicated query.
- */
-static void
-PgPaxosExecutorFinish(QueryDesc *queryDesc)
-{
-	if (PaxosEnabled && IsPgPaxosQuery(queryDesc))
-	{
-		EState *estate = queryDesc->estate;
-		estate->es_finished = true;
-	}
-	else
-	{
-		/* this isn't a query pg_shard handles: use previous hook or standard */
-		if (PreviousExecutorFinishHook != NULL)
-		{
-			PreviousExecutorFinishHook(queryDesc);
-		}
-		else
-		{
-			standard_ExecutorFinish(queryDesc);
-		}
-	}
-}
-
-
-/*
- * PgPaxosExecutorEnd cleans up the executor state after a replicated query,
- * if any, has executed.
- */
-static void
-PgPaxosExecutorEnd(QueryDesc *queryDesc)
-{
-	if (PaxosEnabled && IsPgPaxosQuery(queryDesc))
-	{
-		EState *estate = queryDesc->estate;
-		FreeExecutorState(estate);
-		queryDesc->estate = NULL;
-		queryDesc->totaltime = NULL;
-	}
-	else
-	{
-		/* this isn't a query pg_shard handles: use previous hook or standard */
-		if (PreviousExecutorEndHook != NULL)
-		{
-			PreviousExecutorEndHook(queryDesc);
-		}
-		else
-		{
-			standard_ExecutorEnd(queryDesc);
 		}
 	}
 }
