@@ -1,0 +1,51 @@
+{
+    "name": "pg_paxos",
+    "abstract": "Paxos functions for PostgreSQL",
+    "description": "Adds functions implementing the Paxos consensus algorithm to PostgreSQL",
+    "version": "1.0",
+    "maintainer": "\"Marco Slot\" <marco@citusdata.com>",
+    "license": "lgpl_3_0",
+    "prereqs": {
+       "runtime": {
+          "requires": {
+             "PostgreSQL": "9.3.4"
+          }
+       }
+    },
+    "provides": {
+        "pg_shard": {
+            "abstract": "Paxos functions for PostgreSQL",
+            "file": "sql/pg_paxos--1.0.sql",
+            "docfile": "README.md",
+            "version": "1.0"
+        }
+    },
+    "release_status": "stable",
+    "resources": {
+        "homepage": "https://citusdata.com/",
+        "bugtracker": {
+            "web": "https://github.com/marcocitus/pg_paxos/issues",
+            "mailto": "support@citusdata.com"
+        },
+        "repository": {
+          "url":  "git://github.com/marcocitus/pg_paxos.git",
+          "web":  "https://github.com/marcocitus/pg_paxos",
+          "type": "git"
+        }
+    },
+
+    "generated_by": "\"Marco Slot\" <marco@citusdata.com>",
+
+    "tags": [
+        "replication",
+        "failover",
+        "distribution",
+        "scale",
+        "cluster"
+    ],
+
+    "meta-spec": {
+        "version": "1.0.0",
+        "url": "http://pgxn.org/meta/spec.txt"
+    }
+}

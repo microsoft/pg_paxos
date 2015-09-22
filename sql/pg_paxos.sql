@@ -1,45 +1,50 @@
+-- complain if script is sourced in psql, rather than via CREATE EXTENSION
+\echo Use "CREATE EXTENSION pg_paxos" to load this file. \quit
+
 -- Metadata storage
-
-DROP SCHEMA IF EXISTS pgp_metadata CASCADE;
-
 CREATE SCHEMA pgp_metadata
 
 	-- Stores group metadata (e.g. current leader)
 	CREATE TABLE "group" (
-		group_id bigint not null primary key
+		group_id text not null,
+		last_applied_round bigint not null default -1,
+		PRIMARY KEY (group_id)
 	)
 
 	-- Stores the hosts for each group and in which round the host joined/left
-	CREATE TABLE "hosts" (
-		group_id bigint not null,
+	CREATE TABLE "host" (
+		group_id text not null,
 		node_name text not null,
 		node_port int not null,
 		min_round_id bigint not null,
-		max_round_id bigint
+		max_round_id bigint,
+		FOREIGN KEY (group_id) REFERENCES pgp_metadata.group (group_id)
 	)
 
-	-- Stores round metadata necessary for Paxos 
+	-- Stores round metadata necessary for Paxos
 	CREATE TABLE "round" (
-		group_id bigint not null,
+		group_id text not null,
 		round_id bigint not null,
 		min_proposal_id bigint not null,
 		proposer_id text not null,
 		accepted bool not null default false,
 		consensus bool not null default false,
-		value text
+		value text,
+		PRIMARY KEY (group_id, round_id),
+		FOREIGN KEY (group_id) REFERENCES pgp_metadata.group (group_id)
 	)
 
 	-- Stores which tables are managed by pg_paxos and the group ID
 	CREATE TABLE "replicated_tables" (
 		schema_name text not null,
 		table_name text not null,
-		group_id bigint not null
-	)
+		group_id text not null,
+		PRIMARY KEY (schema_name, table_name),
+		FOREIGN KEY (group_id) REFERENCES pgp_metadata.group (group_id)
+	);
 
-	CREATE INDEX round_id_index ON round (group_id, round_id)
-	CREATE SEQUENCE proposer_id_sequence NO CYCLE;
 
-DROP TYPE IF EXISTS prepare_response CASCADE;
+-- Response message types
 CREATE TYPE prepare_response AS (
 	promised boolean,
 	proposer_id text,
@@ -47,18 +52,48 @@ CREATE TYPE prepare_response AS (
 	value text
 );
 
-DROP TYPE IF EXISTS accept_response CASCADE;
 CREATE TYPE accept_response AS (
 	accepted boolean,
 	proposal_id bigint
 );
 
+
+-- Administrative functions
+
+CREATE FUNCTION paxos_replicate_table(
+								current_group_id text,
+								new_table_name text,
+								new_schema_name text DEFAULT 'public')
+RETURNS void
+AS $BODY$
+BEGIN
+	INSERT INTO pgp_metadata.replicated_tables (
+			schema_name,
+			table_name,
+			group_id)
+	VALUES (new_schema_name,
+			new_table_name,
+			current_group_id);
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
+CREATE FUNCTION paxos_join_group(
+								new_group_id text)
+RETURNS void
+AS $BODY$
+BEGIN
+	INSERT INTO pgp_metadata.group (group_id) VALUES (new_group_id);
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
 -- Acceptor functions
 
--- 
-CREATE OR REPLACE FUNCTION paxos_request_prepare(
+-- Phase 1 of Paxos on the Acceptor
+CREATE FUNCTION paxos_request_prepare(
 								current_proposer_id text,
-								current_group_id bigint,
+								current_group_id text,
 								current_round_id bigint,
 								current_proposal_id bigint)
 RETURNS prepare_response
@@ -96,7 +131,7 @@ BEGIN
 		 (current_proposer_id > round.proposer_id)) THEN
 		-- I've seen a prepare request with a lower ID for this proposal
 
-		UPDATE pgp_metadata.round 
+		UPDATE pgp_metadata.round
 		SET min_proposal_id = current_proposal_id,
 			proposer_id = current_proposer_id
 		WHERE group_id = current_group_id AND round_id = current_round_id;
@@ -113,10 +148,11 @@ BEGIN
 END;
 $BODY$ LANGUAGE 'plpgsql';
 
+
 -- Phase 2 of Paxos on the Acceptor
-CREATE OR REPLACE FUNCTION paxos_request_accept(
+CREATE FUNCTION paxos_request_accept(
 							   current_proposer_id text,
-							   current_group_id bigint,
+							   current_group_id text,
 							   current_round_id bigint,
 							   current_proposal_id bigint,
 							   proposed_value text)
@@ -160,9 +196,9 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 -- Learner functions
-CREATE OR REPLACE FUNCTION paxos_confirm_consensus(
+CREATE FUNCTION paxos_confirm_consensus(
 							current_proposer_id text,
-							current_group_id bigint,
+							current_group_id text,
 							current_round_id bigint,
 							accepted_proposal_id bigint,
 							accepted_value text)
@@ -188,18 +224,19 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 -- Returns the state of the given range of rounds
-CREATE OR REPLACE FUNCTION paxos_copy_state(current_group_id bigint,
-							 start_round_id bigint,
-							 end_round_id bigint)
+CREATE FUNCTION paxos_copy_state(
+							current_group_id text,
+							start_round_id bigint,
+							end_round_id bigint)
 RETURNS SETOF record
 AS $BODY$
 	DECLARE
 	BEGIN
-		RETURN QUERY 
+		RETURN QUERY
 		SELECT * FROM pgp_metadata.round
 		WHERE group_id = current_group_id
 		AND round_id >= start_round_id
-		AND round_id <= end_round_id 
+		AND round_id <= end_round_id
 		AND consensus = true;
 	END;
 $BODY$ LANGUAGE 'plpgsql';
@@ -207,21 +244,22 @@ $BODY$ LANGUAGE 'plpgsql';
 -- Multi-Paxos functions
 
 -- Primitive multi-paxos implementation
-CREATE OR REPLACE FUNCTION paxos_log(
+CREATE FUNCTION paxos_log(
 							proposer_id text,
-							current_group_id bigint,
+							current_group_id text,
 							proposed_value text)
-RETURNS void
+RETURNS bigint
 AS $BODY$
 DECLARE
 	current_round_id bigint;
 	done boolean := false;
 BEGIN
+
 	-- Start with a round ID that is 1 higher than the highest round ID in
 	-- a majority of nodes meaning at least 1 higher than any round ID on which
 	-- consensus was reached. Since I'll use the same nodes as acceptors,
 	-- I have a good chance of getting my proposal accepted.
-	SELECT paxos_new_round_id(current_group_id) INTO current_round_id;
+	SELECT paxos_max_group_round(current_group_id)+1 INTO current_round_id;
 
 	-- Another node could be using the same or higher round ID, but
 	-- if that node reaches consensus on its value for that round we 
@@ -247,73 +285,142 @@ BEGIN
 			RAISE NOTICE 're-running Paxos with round id %', current_round_id;
 		END;
 	END LOOP;
+
+	RETURN current_round_id;
 END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_new_round_id(
-							current_group_id bigint)
+-- Get the highest round ID in the majorityy
+CREATE FUNCTION paxos_max_group_round(
+							current_group_id text,
+							with_consensus boolean DEFAULT false)
 RETURNS bigint
 AS $BODY$
 DECLARE
-	num_hosts int;
-	majority_size int;
 	round_query text;
-	highest_round_id bigint := -1;
+	max_round_id bigint := -1;
 	remote_round_id bigint;
 	host record;
 BEGIN
 	-- Set up connections
 	PERFORM paxos_init_group(current_group_id);
-	
-	-- Ask majority for highest local round
-	round_query := format('SELECT paxos_highest_local_round(%s)',
-			      current_group_id);
 
+	IF with_consensus THEN
+		round_query := format('SELECT paxos_max_consensus_round(%s)',
+							  quote_literal(current_group_id));
+	ELSE
+		round_query := format('SELECT paxos_max_local_round(%s)',
+							  quote_literal(current_group_id));
+	END IF;
+
+	-- Ask majority for highest round
 	PERFORM paxos_broadcast_query(round_query);
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
 		SELECT resp INTO remote_round_id
 		FROM dblink_get_result(host.connection_name) AS (resp int);
 
-		IF remote_round_id > highest_round_id THEN
-			highest_round_id := remote_round_id;
+		IF remote_round_id > max_round_id THEN
+			max_round_id := remote_round_id;
 		END IF;
 
 		-- Need to call get_result again to clear the connection
-		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp prepare_response);
+		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp int);
 	END LOOP;
 
-	RETURN highest_round_id + 1;
+	RETURN max_round_id;
 END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_highest_local_round(group_id bigint)
+-- Get the highest known round ID within the given group from the local metadata
+CREATE FUNCTION paxos_max_local_round(current_group_id text)
 RETURNS bigint AS
 $BODY$
 DECLARE
 	end_range bigint;
 BEGIN
-	SELECT max(round_id) INTO end_range FROM pgp_metadata.round;
+	SELECT max(round_id) INTO end_range FROM pgp_metadata.round WHERE group_id = current_group_id;
 	RETURN end_range;
 END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Apply all pending log items
+CREATE FUNCTION paxos_apply_log(
+							current_proposer_id text,
+							current_group_id text,
+							max_round_id bigint)
+RETURNS bigint
+AS $BODY$
+DECLARE
+	last_applied_round_id bigint;
+	current_round_id bigint;
+	query text;
+BEGIN
+	-- We don't want multiple processes applying the same log
+	LOCK TABLE pgp_metadata.group IN ROW EXCLUSIVE MODE;
+
+	SELECT last_applied_round INTO last_applied_round_id
+	FROM pgp_metadata.group
+	WHERE group_id = current_group_id;
+
+	IF max_round_id >= 0
+	AND max_round_id <= last_applied_round_id THEN
+		-- Exit early if all changes have been applied
+		RETURN last_applied_round_id;
+	END IF;
+	
+	-- Find highest completed round
+	SELECT paxos_max_group_round(current_group_id, true) INTO max_round_id;
+
+	current_round_id := last_applied_round_id;
+
+	WHILE current_round_id < max_round_id LOOP
+
+		current_round_id := current_round_id + 1;
+	
+		SELECT value INTO query
+		FROM pgp_metadata.round
+		WHERE group_id = current_group_id AND round_id = current_round_id AND consensus;
+
+		IF NOT FOUND THEN
+			SELECT paxos(
+						current_proposer_id,
+						current_group_id,
+						current_round_id,
+						NULL,
+						true) INTO query;
+		END IF;
+
+		RAISE NOTICE 'Executing %', query;
+		
+		EXECUTE query;
+	END LOOP;
+
+	UPDATE pgp_metadata.group
+	SET last_applied_round = max_round_id
+	WHERE group_id = current_group_id;
+
+	RETURN max_round_id;
+END;
+$BODY$ LANGUAGE 'plpgsql';
+
+
 -- Get the highest round number which can be locally committed
-CREATE OR REPLACE FUNCTION paxos_highest_consensus_round(group_id bigint)
+CREATE FUNCTION paxos_max_consensus_round(current_group_id text)
 RETURNS bigint AS
 $BODY$
 DECLARE
 	end_range bigint;
 BEGIN
 	SELECT round_id INTO end_range
-	FROM (SELECT round_id, lag(round_id) OVER (ORDER BY round_id) prev FROM pgp_metadata.round ORDER BY round_id) AS off
+	FROM (SELECT round_id, lag(round_id) OVER (ORDER BY round_id) prev FROM pgp_metadata.round WHERE group_id = current_group_id ORDER BY round_id) AS off
 	WHERE round_id - prev > 1 LIMIT 1;
 
 	IF NOT FOUND THEN
-		SELECT max(round_id) INTO end_range FROM pgp_metadata.round;
+		SELECT max(round_id) INTO end_range FROM pgp_metadata.round WHERE group_id = current_group_id;
 	END IF;
 
 	RETURN end_range;
@@ -321,13 +428,13 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-		
+
 
 -- Proposer functions
 
-CREATE OR REPLACE FUNCTION paxos(
+CREATE FUNCTION paxos(
 							current_proposer_id text,
-							current_group_id bigint,
+							current_group_id text,
 							current_round_id bigint,
 							proposed_value text DEFAULT NULL,
 							fail_on_change boolean DEFAULT false)
@@ -392,7 +499,7 @@ BEGIN
 		IF num_prepare_responses < majority_size THEN
 			RAISE NOTICE 'could not get prepare responses from majority, retrying after 1 sec';
 
-			PERFORM pg_sleep(1); 
+			PERFORM pg_sleep(1);
 			current_proposal_id := current_proposal_id + 1;
 			CONTINUE;
 		END IF;
@@ -490,6 +597,14 @@ BEGIN
 							current_proposal_id,
 							proposed_value);
 
+	-- Confirm it locally
+	PERFORM paxos_confirm_consensus(
+							current_proposer_id,
+							current_group_id,
+							current_round_id,
+							current_proposal_id,
+							proposed_value);
+
 	PERFORM paxos_close_connections();
 
 	DROP TABLE prepare_responses;
@@ -507,9 +622,9 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_prepare(
+CREATE FUNCTION paxos_prepare(
 							current_proposer_id text,
-							current_group_id bigint,
+							current_group_id text,
 							current_round_id bigint,
 							current_proposal_id bigint)
 RETURNS SETOF prepare_response
@@ -520,7 +635,7 @@ DECLARE
 BEGIN
 	prepare_query := format('SELECT paxos_request_prepare(%s,%s,%s,%s)',
 							quote_literal(current_proposer_id),
-							current_group_id,
+							quote_literal(current_group_id),
 							current_round_id,
 							current_proposal_id);
 
@@ -538,9 +653,9 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_accept(
+CREATE FUNCTION paxos_accept(
 							current_proposer_id text,
-							current_group_id bigint,
+							current_group_id text,
 							current_round_id bigint,
 							current_proposal_id bigint,
 							proposed_value text)
@@ -552,7 +667,7 @@ DECLARE
 BEGIN
 	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s)',
 							quote_literal(current_proposer_id),
-							current_group_id,
+							quote_literal(current_group_id),
 							current_round_id,
 							current_proposal_id,
 							quote_literal(proposed_value));
@@ -570,9 +685,9 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_inform_learners(
+CREATE FUNCTION paxos_inform_learners(
 							current_proposer_id text,
-							current_group_id bigint,
+							current_group_id text,
 							current_round_id bigint,
 							current_proposal_id bigint,
 							proposed_value text)
@@ -585,7 +700,7 @@ BEGIN
 	-- For now, only acceptors are learners to avoid re-connecting to failed nodes
 	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s,%s,%s)',
 							quote_literal(current_proposer_id),
-							current_group_id,
+							quote_literal(current_group_id),
 							current_round_id,
 							current_proposal_id,
 							quote_literal(proposed_value));
@@ -602,8 +717,8 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_init_group(
-							current_group_id bigint)
+CREATE FUNCTION paxos_init_group(
+							current_group_id text)
 RETURNS int
 AS $BODY$
 DECLARE
@@ -618,7 +733,7 @@ BEGIN
 
 	majority_size = num_hosts / 2 + 1;
 
-	-- Try to open connections to a majority of hosts 
+	-- Try to open connections to a majority of hosts
 	SELECT paxos_open_connections(majority_size) INTO num_open_connections;
 
 	IF num_open_connections < majority_size THEN
@@ -631,8 +746,8 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_find_hosts(
-							current_group_id bigint)
+CREATE FUNCTION paxos_find_hosts(
+							current_group_id text)
 RETURNS int
 AS $BODY$
 DECLARE
@@ -651,7 +766,7 @@ BEGIN
 
 		INSERT INTO hosts
 		SELECT format('%s:%s', node_name, node_port) AS connection_name, node_name, node_port, false AS connected, true AS participating
-		FROM pgp_metadata.hosts 
+		FROM pgp_metadata.host
 		WHERE group_id = current_group_id;
 
 	END IF;
@@ -663,7 +778,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_open_connections(majority_size int)
+CREATE FUNCTION paxos_open_connections(majority_size int)
 RETURNS int
 AS $BODY$
 DECLARE
@@ -674,7 +789,7 @@ BEGIN
 	FOR host IN SELECT * FROM hosts h LEFT OUTER JOIN (SELECT unnest AS connected FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
 		IF NOT host.connected THEN
 			connection_string := format('hostaddr=%s port=%s connect_timeout=10', host.node_name, host.node_port);
-		
+
 			BEGIN
 				PERFORM dblink_connect(host.connection_name, connection_string);
 				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
@@ -697,7 +812,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_broadcast_query(query_string text)
+CREATE FUNCTION paxos_broadcast_query(query_string text)
 RETURNS void
 AS $BODY$
 DECLARE
@@ -715,7 +830,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
-CREATE OR REPLACE FUNCTION paxos_close_connections()
+CREATE FUNCTION paxos_close_connections()
 RETURNS void
 AS $BODY$
 DECLARE
@@ -726,7 +841,3 @@ BEGIN
 	END LOOP;
 END;
 $BODY$ LANGUAGE 'plpgsql';
-
-INSERT INTO pgp_metadata.hosts VALUES (0, '127.0.0.1', 5432, 0);
-INSERT INTO pgp_metadata.hosts VALUES (0, '127.0.0.1', 9700, 0);
-INSERT INTO pgp_metadata.hosts VALUES (0, '127.0.0.1', 9701, 0);
