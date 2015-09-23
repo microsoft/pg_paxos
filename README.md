@@ -81,3 +81,6 @@ An example of how pg_paxos replicates the metadata:
      20 | 2
     (2 rows)
 
+License
+
+Copyright © 2012–2015 Citus Data, Inc.
