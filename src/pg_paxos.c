@@ -109,8 +109,6 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		char *sqlQuery = (char *) queryDesc->sourceText;
 		char *groupId = NULL; 
 		char *proposerId = NULL;
-		bool isWrite = false;
-		int64 syncRoundId = -1;
 
 		groupId = DeterminePaxosGroup(queryDesc);
 		proposerId = GenerateProposerId();
@@ -118,37 +116,40 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
 			commandType == CMD_DELETE)
 		{
-			isWrite = true;
-		}
-
-		if (isWrite)
-		{
 			/*
  			 * Log the current query through Paxos. In the future, we will want to
  			 * separately log a commit record, since we'd prefer not logging queries
  			 * that fail.
  			 */
-			syncRoundId = PaxosLog(groupId, proposerId, sqlQuery) - 1;
+			int64 loggedRoundId = PaxosLog(groupId, proposerId, sqlQuery);
 			CommandCounterIncrement();
-		}
 	
-		/*
-		 * The PaxosApplyLog function will apply all SQL queries in the log
-		 * on which there is consensus, except the current query (hence the
-		 * minus 1 above). 
-		 */
-		PaxosEnabled = false;
-		PaxosApplyLog(groupId, proposerId, syncRoundId);
-		PaxosEnabled = true;
-		CommandCounterIncrement();
+			/*
+			 * The PaxosApplyLog function will apply all SQL queries in the log
+			 * on which there is consensus, except the current query (hence the
+			 * minus 1).
+			 */
+			PaxosEnabled = false;
+			PaxosApplyLog(groupId, proposerId, false, loggedRoundId - 1);
+			PaxosEnabled = true;
+			CommandCounterIncrement();
 
-		if (isWrite)
-		{
 			/* 
 			 * Mark the current query as applied and let the regular executor handle
 			 * it. This change be rolled back if the current query fails.
 			 */
-			PaxosSetApplied(groupId, syncRoundId + 1);
+			PaxosSetApplied(groupId, loggedRoundId);
+			CommandCounterIncrement();
+		}
+		else
+		{
+			/*
+			 * The PaxosApplyLog function will apply all SQL queries in the log
+			 * on which there is consensus.
+			 */
+			PaxosEnabled = false;
+			PaxosApplyLog(groupId, proposerId, true, 0);
+			PaxosEnabled = true;
 			CommandCounterIncrement();
 		}
 

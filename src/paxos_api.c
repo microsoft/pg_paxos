@@ -57,7 +57,7 @@ PaxosLog(char *groupId, char *proposerId, char* value)
 
 
 int64
-PaxosApplyLog(char *groupId, char *proposerId, int64 maxRoundId)
+PaxosApplyLog(char *groupId, char *proposerId, bool findLatest, int64 maxRoundId)
 {
 	int roundId = -1;
 	Datum roundIdDatum = 0;
@@ -71,12 +71,22 @@ PaxosApplyLog(char *groupId, char *proposerId, int64 maxRoundId)
 		CStringGetTextDatum(groupId),
 		Int64GetDatum(maxRoundId)
 	};
+	char nulls[] = {
+		' ',
+		' ',
+		' '
+	};
 	bool isNull = false;
+
+	if (findLatest)
+	{
+		nulls[2] = 'n';
+	}
 	
 	SPI_connect();
 
 	SPI_execute_with_args("SELECT paxos_apply_log($1,$2,$3)",
-						  3, argTypes, argValues, NULL, false, 1);
+						  3, argTypes, argValues, nulls, false, 1);
 
 	roundIdDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1,
 								 &isNull);

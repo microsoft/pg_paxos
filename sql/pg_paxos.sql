@@ -368,14 +368,10 @@ BEGIN
 	FROM pgp_metadata.group
 	WHERE group_id = current_group_id;
 
-	IF max_round_id >= 0
-	AND max_round_id <= last_applied_round_id THEN
-		-- Exit early if all changes have been applied
-		RETURN last_applied_round_id;
+	IF max_round_id IS NULL THEN
+		-- Find highest completed round
+		SELECT paxos_max_group_round(current_group_id, true) INTO max_round_id;
 	END IF;
-	
-	-- Find highest completed round
-	SELECT paxos_max_group_round(current_group_id, true) INTO max_round_id;
 
 	current_round_id := last_applied_round_id;
 
