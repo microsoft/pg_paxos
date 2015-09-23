@@ -20,6 +20,5 @@
 extern char *PaxosTableGroup(Oid paxosTableOid);
 extern bool IsPaxosTable(Oid tableId);
 extern bool PaxosTablesExist(void);
-extern void InsertPaxosTableRow(Oid paxosTableId, int64 groupId);
 
 #endif /* PG_PAXOS_TABLE_METADATA_H */

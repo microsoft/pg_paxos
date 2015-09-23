@@ -176,39 +176,3 @@ PaxosTablesExist(void)
 
 	return paxosTablesExist;
 }
-
-
-/*
- * InsertPaxosTableRow inserts a new row into the replicated_tables table using the
- * supplied values.
- */
-void
-InsertPaxosTableRow(Oid paxosTableOid, int64 groupId)
-{
-
-	Oid tableNamespaceOid = get_rel_namespace(paxosTableOid);
-	char *schemaName = get_namespace_name(tableNamespaceOid);
-	char *tableName = get_rel_name(paxosTableOid);
-	Oid argTypes[] = {
-		TEXTOID,
-		TEXTOID,
-		INT8OID
-	};
-	Datum argValues[] = {
-		CStringGetTextDatum(schemaName),
-		CStringGetTextDatum(tableName),
-		Int64GetDatum(groupId)
-	};
-	const int argCount = 3;
-	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
-
-	SPI_connect();
-
-	spiStatus = SPI_execute_with_args("INSERT INTO pgp_metadata.replicated_tables "
-									  "(schema_name, table_name, group_id) "
-									  "VALUES ($1, $2, $3)", argCount, argTypes,
-									  argValues, NULL, false, 0);
-	Assert(spiStatus == SPI_OK_INSERT);
-
-	SPI_finish();
-}
