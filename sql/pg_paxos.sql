@@ -597,14 +597,6 @@ BEGIN
 							current_proposal_id,
 							proposed_value);
 
-	-- Confirm it locally
-	PERFORM paxos_confirm_consensus(
-							current_proposer_id,
-							current_group_id,
-							current_round_id,
-							current_proposal_id,
-							proposed_value);
-
 	IF NOT preserve_session THEN
 		PERFORM paxos_close_connections();
 		DROP TABLE hosts;
