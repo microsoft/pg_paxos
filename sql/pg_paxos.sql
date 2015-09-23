@@ -4,7 +4,7 @@
 -- Metadata storage
 CREATE SCHEMA pgp_metadata
 
-	-- Stores group metadata (e.g. current leader)
+	-- Stores group metadata 
 	CREATE TABLE "group" (
 		group_id text not null,
 		last_applied_round bigint not null default -1,
@@ -241,6 +241,7 @@ AS $BODY$
 	END;
 $BODY$ LANGUAGE 'plpgsql';
 
+
 -- Multi-Paxos functions
 
 -- Primitive multi-paxos implementation
@@ -276,6 +277,7 @@ BEGIN
 							current_group_id,
 							current_round_id,
 							proposed_value,
+							true,
 							true);
 			done := true;
 		EXCEPTION WHEN SQLSTATE '19890' THEN
@@ -319,14 +321,14 @@ BEGIN
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
 		SELECT resp INTO remote_round_id
-		FROM dblink_get_result(host.connection_name) AS (resp int);
+		FROM dblink_get_result(host.connection_name, false) AS (resp int);
 
 		IF remote_round_id > max_round_id THEN
 			max_round_id := remote_round_id;
 		END IF;
 
 		-- Need to call get_result again to clear the connection
-		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp int);
+		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp int);
 	END LOOP;
 
 	RETURN max_round_id;
@@ -394,7 +396,7 @@ BEGIN
 						true) INTO query;
 		END IF;
 
-		RAISE NOTICE 'Executing %', query;
+		RAISE NOTICE 'Executing: %', query;
 		
 		EXECUTE query;
 	END LOOP;
@@ -437,7 +439,8 @@ CREATE FUNCTION paxos(
 							current_group_id text,
 							current_round_id bigint,
 							proposed_value text DEFAULT NULL,
-							fail_on_change boolean DEFAULT false)
+							fail_on_change boolean DEFAULT false,
+							preserve_session boolean DEFAULT false)
 RETURNS text
 AS $BODY$
 DECLARE
@@ -605,16 +608,18 @@ BEGIN
 							current_proposal_id,
 							proposed_value);
 
-	PERFORM paxos_close_connections();
+	IF NOT preserve_session THEN
+		PERFORM paxos_close_connections();
+		DROP TABLE hosts;
+	END IF;
 
 	DROP TABLE prepare_responses;
 	DROP TABLE accept_responses;
-	DROP TABLE hosts;
 
 	IF value_changed AND fail_on_change THEN
 		-- We reached consensus and a value on which there was no consensus
 		-- yet, but from a different proposal.
-		RAISE 'consensus was reached on a different value: %s', proposed_value;
+		RAISE SQLSTATE '19980' USING message = 'consensus was reached on a different value';
 	END IF;
 
 	RETURN proposed_value;
@@ -622,6 +627,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Phase 1 of Paxos on the proposer
 CREATE FUNCTION paxos_prepare(
 							current_proposer_id text,
 							current_group_id text,
@@ -643,16 +649,17 @@ BEGIN
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
 		RETURN QUERY
-		SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp prepare_response);
+		SELECT (resp).* FROM dblink_get_result(host.connection_name, false) AS (resp prepare_response);
 
 		-- Need to call get_result again to clear the connection
-		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp prepare_response);
+		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp prepare_response);
 	END LOOP;
 
 END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Phase 2 of Paxos on the proposer
 CREATE FUNCTION paxos_accept(
 							current_proposer_id text,
 							current_group_id text,
@@ -679,7 +686,7 @@ BEGIN
 		SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp accept_response);
 
 		-- Need to call get_result again to clear the connection
-		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp accept_response);
+		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp accept_response);
 	END LOOP;
 END;
 $BODY$ LANGUAGE 'plpgsql';
@@ -708,15 +715,16 @@ BEGIN
 	PERFORM paxos_broadcast_query(confirm_query);
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
-		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp boolean);
+		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp boolean);
 
 		-- Need to call get_result again to clear the connection
-		PERFORM * FROM dblink_get_result(host.connection_name) AS (resp boolean);
+		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp boolean);
 	END LOOP;
 END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Connect to majority of hosts in group
 CREATE FUNCTION paxos_init_group(
 							current_group_id text)
 RETURNS int
@@ -746,6 +754,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Take a snapshot of the current hosts in the group
 CREATE FUNCTION paxos_find_hosts(
 							current_group_id text)
 RETURNS int
@@ -778,6 +787,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Open up to majority_size connections
 CREATE FUNCTION paxos_open_connections(majority_size int)
 RETURNS int
 AS $BODY$
@@ -786,8 +796,22 @@ DECLARE
 	connection_string text;
 	host record;
 BEGIN
-	FOR host IN SELECT * FROM hosts h LEFT OUTER JOIN (SELECT unnest AS connected FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
-		IF NOT host.connected THEN
+	FOR host IN SELECT *
+	FROM hosts h LEFT OUTER JOIN
+		 (SELECT unnest AS connected FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
+
+		IF host.connected THEN
+			IF dblink_error_message(host.connection_name) <> 'OK' THEN
+				-- Close connections that have errored out, will not be used next round
+				RAISE NOTICE 'connection error: %', dblink_error_message(host.connection_name);
+				PERFORM dblink_disconnect(host.connection_name);
+				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
+			ELSE
+				-- We previously opened this connection
+				num_open_connections := num_open_connections + 1;
+			END IF;
+		ELSE
+			-- Open new connection
 			connection_string := format('hostaddr=%s port=%s connect_timeout=10', host.node_name, host.node_port);
 
 			BEGIN
@@ -798,8 +822,6 @@ BEGIN
 				RAISE NOTICE 'failed to connect to %:%', host.node_name, host.node_port;
 				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
 			END;
-		ELSE
-			num_open_connections := num_open_connections + 1;
 		END IF;
 
 		IF num_open_connections >= majority_size THEN
@@ -812,6 +834,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Send a query to all connected hosts in the group
 CREATE FUNCTION paxos_broadcast_query(query_string text)
 RETURNS void
 AS $BODY$
@@ -830,6 +853,7 @@ END;
 $BODY$ LANGUAGE 'plpgsql';
 
 
+-- Close all open connections
 CREATE FUNCTION paxos_close_connections()
 RETURNS void
 AS $BODY$
