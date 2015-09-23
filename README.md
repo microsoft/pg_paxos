@@ -2,7 +2,7 @@
 
 This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and table replication through Paxos. It is in a very early stage, consider it primarily for educational purposes. 
 
-The table replication method logs every INSERT/UPDATE/DELETE on a table through Paxos. When a query is performed on a the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, which guarantees read-your-writes consistency. By using the Paxos algorithm, pg_paxos is also robust to failure or partitioning of a minority of nodes (1 out of 3, 2 out of 5, etc.). 
+The table replication method logs every INSERT/UPDATE/DELETE on a table through Paxos. When a query is performed on a the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, which guarantees read-your-writes consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (1 out of 3, 2 out of 5, etc.). 
 
 ## Usage
 
