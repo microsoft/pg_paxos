@@ -389,6 +389,7 @@ BEGIN
 						current_group_id,
 						current_round_id,
 						NULL,
+						true,
 						true) INTO query;
 		END IF;
 
