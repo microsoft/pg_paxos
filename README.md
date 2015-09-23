@@ -17,6 +17,9 @@ To activate executor hooks, add pg_paxos to the shared_preload_libraries in post
 An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After setting up the metadata, all writes to the coordinates table are replicated to the other nodes.
 
     -- run via psql on each node:
+    CREATE EXTENSION dblink;
+    CREATE EXTENSION pg_paxos;
+    
     CREATE TABLE coordinates (
         x int,
         y int
