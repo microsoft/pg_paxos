@@ -109,6 +109,10 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		char *sqlQuery = (char *) queryDesc->sourceText;
 		char *groupId = NULL; 
 		char *proposerId = NULL;
+		bool topLevel = true;
+
+		/* disallow transactions during paxos commands */
+		PreventTransactionChain(topLevel, "paxos commands");
 
 		groupId = DeterminePaxosGroup(queryDesc);
 		proposerId = GenerateProposerId();
