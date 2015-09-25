@@ -49,17 +49,8 @@ PaxosTableGroup(Oid paxosTableOid)
 {
 	char *groupId = NULL;
 	Datum groupIdDatum = 0;
-	Oid tableNamespaceOid = get_rel_namespace(paxosTableOid);
-	char *schemaName = get_namespace_name(tableNamespaceOid);
-	char *tableName = get_rel_name(paxosTableOid);
-	Oid argTypes[] = {
-		TEXTOID,
-		TEXTOID
-	};
-	Datum argValues[] = {
-		CStringGetTextDatum(schemaName),
-		CStringGetTextDatum(tableName)
-	};
+	Oid argTypes[] = { OIDOID };
+	Datum argValues[] = { paxosTableOid };
 	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
 	bool isNull = false;
 
@@ -77,8 +68,8 @@ PaxosTableGroup(Oid paxosTableOid)
 
 	spiStatus = SPI_execute_with_args("SELECT group_id "
 									  "FROM pgp_metadata.replicated_tables "
-									  "WHERE schema_name = $1 AND table_name = $2",
-									  2, argTypes, argValues, NULL, false, 1);
+									  "WHERE table_oid = $1",
+									  1, argTypes, argValues, NULL, false, 1);
 	Assert(spiStatus == SPI_OK_SELECT);
 
 	if (SPI_processed != 1)
@@ -112,12 +103,10 @@ IsPaxosTable(Oid tableOid)
 {
 	bool isPaxosTable = false;
 	Oid metadataNamespaceOid = get_namespace_oid("pgp_metadata", false);
-	Oid tableMetadataTableOid = InvalidOid;
 	Oid tableNamespaceOid = get_rel_namespace(tableOid);
-	char *schemaName = get_namespace_name(tableNamespaceOid);
-	char *tableName = get_rel_name(tableOid);
-	Oid argTypes[] = { TEXTOID, TEXTOID };
-	Datum argValues[] = { 0, 0 };
+	Oid tableMetadataTableOid = InvalidOid;
+	Oid argTypes[] = { OIDOID };
+	Datum argValues[] = { tableOid };
 	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
 
 	/* short-circuit if the input is invalid */
@@ -136,15 +125,12 @@ IsPaxosTable(Oid tableOid)
 		return false;
 	}
 
-	argValues[0] = CStringGetTextDatum(schemaName);
-	argValues[1] = CStringGetTextDatum(tableName);
-
 	SPI_connect();
 
 	spiStatus = SPI_execute_with_args("SELECT 1 "
 									  "FROM pgp_metadata.replicated_tables "
-									  "WHERE schema_name = $1 AND table_name = $2",
-									  2, argTypes, argValues, NULL, true, 1);
+									  "WHERE table_oid = $1",
+									  1, argTypes, argValues, NULL, true, 1);
 	Assert(spiStatus == SPI_OK_SELECT);
 
 	isPaxosTable = (SPI_processed == 1);

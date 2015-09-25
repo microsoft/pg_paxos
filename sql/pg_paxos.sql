@@ -33,10 +33,9 @@ CREATE SCHEMA pgp_metadata
 
 	-- Stores which tables are managed by pg_paxos and the group ID
 	CREATE TABLE "replicated_tables" (
-		schema_name text not null,
-		table_name text not null,
+		table_oid regclass not null,
 		group_id text not null,
-		PRIMARY KEY (schema_name, table_name),
+		PRIMARY KEY (table_oid),
 		FOREIGN KEY (group_id) REFERENCES pgp_metadata.group (group_id)
 	);
 
@@ -59,17 +58,14 @@ CREATE TYPE accept_response AS (
 
 CREATE FUNCTION paxos_replicate_table(
 								current_group_id text,
-								new_table_name text,
-								new_schema_name text DEFAULT 'public')
+								new_table_oid regclass)
 RETURNS void
 AS $BODY$
 BEGIN
 	INSERT INTO pgp_metadata.replicated_tables (
-			schema_name,
 			table_name,
 			group_id)
-	VALUES (new_schema_name,
-			new_table_name,
+	VALUES (new_table_oid,
 			current_group_id);
 END;
 $BODY$ LANGUAGE plpgsql;
