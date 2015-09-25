@@ -1,14 +1,14 @@
 # pg_paxos
 
-This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and table replication through Paxos. It is in a very early stage, consider it primarily for educational purposes. 
+This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and basic table replication through Paxos. It is in a very early stage, consider it primarily for educational purposes. 
 
-The table replication method logs every INSERT/UPDATE/DELETE on a table through Paxos. When a query is performed on a the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, which guarantees read-your-writes consistency. By using the Paxos algorithm, pg_paxos is also robust to failure or partitioning of a minority of nodes (1 out of 3, 2 out of 5, etc.). 
+The table replication method logs every INSERT/UPDATE/DELETE on a table through Paxos. When a query is performed on a the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, which guarantees read-your-writes consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (e.g. 2 out of 5). 
 
 ## Usage
 
 pg_paxos depends on the dblink extension being installed.
 
-To activate executor hooks, add pg_paxos to the shared_preload_libraries in postgresql.conf and restart postgres. It is also advisable to specify a unique node_id, which is needed to guarantee consistency in certain scenarios.
+To intercept queries, pg_paxos uses PostgreSQL's executor hooks. To activate executor hooks, add pg_paxos to the shared_preload_libraries in postgresql.conf and restart postgres. It is also advisable to specify a unique node_id, which is needed to guarantee consistency in certain scenarios.
 
     # in postgresql.conf
     shared_preload_libraries = 'pg_paxos'
@@ -17,6 +17,9 @@ To activate executor hooks, add pg_paxos to the shared_preload_libraries in post
 An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After setting up the metadata, all writes to the coordinates table are replicated to the other nodes.
 
     -- run via psql on each node:
+    CREATE EXTENSION dblink;
+    CREATE EXTENSION pg_paxos;
+    
     CREATE TABLE coordinates (
         x int,
         y int
