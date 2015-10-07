@@ -18,8 +18,17 @@
 
 #define MAX_PAXOS_GROUP_ID_LENGTH 128
 
+
+/* configuration parameter that specifies a unique node ID */
+char *PaxosNodeId = NULL;
+
+
 /* function declarations for extension loading and unloading */
 extern void _PG_init(void);
 extern void _PG_fini(void);
+
+
+/* function declarations for pg_paxos utility functions */
+extern char *GenerateProposerId(void);
 
 #endif /* PG_PAXOS_H */

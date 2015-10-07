@@ -44,9 +44,6 @@
 #include "utils/snapmgr.h"
 
 
-/* unique node ID */
-static char *PaxosNodeId = NULL;
-
 /* whether writes go through Paxos */
 static bool PaxosEnabled = true;
 
@@ -55,7 +52,6 @@ static bool PaxosEnabled = true;
 static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
 static bool IsPgPaxosQuery(QueryDesc *queryDesc);
 static char *DeterminePaxosGroup(QueryDesc *queryDesc);
-static char* GenerateProposerId(void);
 static void FinishPaxosTransaction(XactEvent event, void *arg);
 
 /* declarations for dynamic loading */
@@ -120,12 +116,23 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
 			commandType == CMD_DELETE)
 		{
+			int64 loggedRoundId = 0;
+
+			/*
+			 * The PaxosApplyLog function will apply all SQL queries in the log
+			 * on which there is consensus.
+			 */
+			PaxosEnabled = false;
+			PaxosApplyLog(groupId, proposerId, true, 0);
+			PaxosEnabled = true;
+			CommandCounterIncrement();
+
 			/*
  			 * Log the current query through Paxos. In the future, we will want to
  			 * separately log a commit record, since we'd prefer not logging queries
  			 * that fail.
  			 */
-			int64 loggedRoundId = PaxosLog(groupId, proposerId, sqlQuery);
+			loggedRoundId = PaxosLog(groupId, proposerId, sqlQuery);
 			CommandCounterIncrement();
 	
 			/*
@@ -140,7 +147,7 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 
 			/* 
 			 * Mark the current query as applied and let the regular executor handle
-			 * it. This change be rolled back if the current query fails.
+			 * it. This change is rolled back if the current query fails.
 			 */
 			PaxosSetApplied(groupId, loggedRoundId);
 			CommandCounterIncrement();
@@ -252,7 +259,7 @@ DeterminePaxosGroup(QueryDesc *queryDesc)
  * It mainly relies on the pg_paxos.node_id setting to distinguish hosts,
  * and appends the process ID and transaction ID to ensure local uniqueness.
  */
-static char*
+char *
 GenerateProposerId(void)
 {
 	StringInfo proposerId = makeStringInfo();
