@@ -633,8 +633,6 @@ BEGIN
 		BEGIN
 			EXECUTE query;
 		EXCEPTION WHEN others THEN
-			RAISE NOTICE 'Error: %', SQLERRM;
-
 			UPDATE pgp_metadata.round
 			SET error = SQLERRM
 			WHERE group_id = current_group_id AND round_id = current_round_id;
