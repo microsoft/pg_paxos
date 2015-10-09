@@ -79,24 +79,6 @@ END;
 $BODY$ LANGUAGE plpgsql;
 
 
-CREATE FUNCTION paxos_create_group(
-								new_group_id text,
-								my_hostname text,
-								my_port int)
-RETURNS void
-AS $BODY$
-BEGIN
-	INSERT INTO pgp_metadata.group (
-			group_id)
-	VALUES (new_group_id);
-
-	INSERT INTO pgp_metadata.hosts (
-			group_id)
-	VALUES (new_group_id, my_hostname, my_port);
-END;
-$BODY$ LANGUAGE plpgsql;
-
-
 -- Acceptor functions
 
 -- Phase 1 of Paxos on the Acceptor
