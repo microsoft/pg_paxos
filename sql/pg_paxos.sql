@@ -552,13 +552,18 @@ CREATE FUNCTION paxos_max_group_round(
 RETURNS bigint
 AS $BODY$
 DECLARE
+	num_hosts int;
+	majority_size int;
 	round_query text;
 	max_round_id bigint := -1;
+	num_responses := 0;
 	remote_round_id bigint;
 	host record;
 BEGIN
 	-- Set up connections
-	PERFORM paxos_init_group(current_group_id);
+	SELECT paxos_init_group(current_group_id) INTO num_hosts;
+
+	majority_size = num_hosts / 2 + 1;
 
 	round_query := format('SELECT max(round_id) '||
 						  'FROM pgp_metadata.round '||
@@ -579,9 +584,15 @@ BEGIN
 		IF remote_round_id IS NOT NULL AND remote_round_id > max_round_id THEN
 			max_round_id := remote_round_id;
 		END IF;
+
+		num_responses := num_responses + 1;
 	END LOOP;
 
 	PERFORM paxos_clear_connections();
+
+	IF num_responses < majority_size THEN
+		RAISE 'could only get % out of % responses', num_responses, majority_size;
+	END IF;
 
 	RETURN max_round_id;
 END;
