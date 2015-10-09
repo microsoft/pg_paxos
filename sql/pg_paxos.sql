@@ -697,6 +697,11 @@ BEGIN
 	SELECT paxos_max_group_round(current_group_id) INTO current_round_id;
 
 	WHILE NOT value_written LOOP
+		PERFORM paxos_apply_log(
+						current_proposer_id,
+						current_group_id,
+						current_round_id);
+
 		current_round_id := current_round_id + 1;
 
 		proposed_value := format('INSERT INTO pgp_metadata.hosts VALUES (%s,%s,%d,%d)',
@@ -732,6 +737,11 @@ BEGIN
 	SELECT paxos_max_group_round(current_group_id) INTO current_round_id;
 
 	WHILE NOT value_written LOOP
+		PERFORM paxos_apply_log(
+						current_proposer_id,
+						current_group_id,
+						current_round_id);
+
 		current_round_id := current_round_id + 1;
 
 		proposed_value := format('UPDATE pgp_metadata.hosts '||
