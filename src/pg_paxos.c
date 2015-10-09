@@ -50,9 +50,13 @@ PG_MODULE_MAGIC;
 
 /* executor functions forward declarations */
 static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
-static bool IsPgPaxosQuery(QueryDesc *queryDesc);
-static char *DeterminePaxosGroup(QueryDesc *queryDesc);
+static bool HasPaxosTable(List *rangeTableList);
+static char *DeterminePaxosGroup(List *rangeTableList);
+static void PrepareConsistentRead(char *groupId, char *proposerId);
 static void FinishPaxosTransaction(XactEvent event, void *arg);
+static void PgPaxosProcessUtility(Node *parsetree, const char *queryString,
+								  ProcessUtilityContext context, ParamListInfo params,
+								  DestReceiver *dest, char *completionTag);
 
 
 /* Enumeration that represents the consistency model to use */
@@ -76,6 +80,7 @@ static bool PaxosEnabled = true;
 
 /* saved hook values in case of unload */
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
+static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
 /**/
 static int ReadConsistencyModel = STRONG_CONSISTENCY;
@@ -92,6 +97,9 @@ _PG_init(void)
 {
 	PreviousExecutorStartHook = ExecutorStart_hook;
 	ExecutorStart_hook = PgPaxosExecutorStart;
+
+	PreviousProcessUtilityHook = ProcessUtility_hook;
+	ProcessUtility_hook = PgPaxosProcessUtility;
 
 	DefineCustomStringVariable("pg_paxos.node_id",
 							   "Unique node ID to use in Paxos interactions", NULL,
@@ -113,6 +121,7 @@ _PG_init(void)
 void
 _PG_fini(void)
 {
+	ProcessUtility_hook = PreviousProcessUtilityHook;
 	ExecutorStart_hook = PreviousExecutorStartHook;
 
 	RegisterXactCallback(FinishPaxosTransaction, NULL);
@@ -125,7 +134,10 @@ _PG_fini(void)
 static void
 PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-	if (PaxosEnabled && IsPgPaxosQuery(queryDesc))
+	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
+	List *rangeTableList = plannedStmt->rtable;
+
+	if (PaxosEnabled && HasPaxosTable(rangeTableList))
 	{
 		CmdType commandType = queryDesc->operation;
 		char *sqlQuery = (char *) queryDesc->sourceText;
@@ -136,7 +148,7 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		/* disallow transactions during paxos commands */
 		PreventTransactionChain(topLevel, "paxos commands");
 
-		groupId = DeterminePaxosGroup(queryDesc);
+		groupId = DeterminePaxosGroup(rangeTableList);
 		proposerId = GenerateProposerId();
 
 		if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
@@ -161,25 +173,7 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		}
 		else
 		{
-			int64 maxRoundId = -1;
-			int64 maxAppliedRoundId = PaxosMaxAppliedRound(groupId);
-
-			if (ReadConsistencyModel == STRONG_CONSISTENCY)
-			{
-				maxRoundId = PaxosMaxAcceptedRound(groupId);
-			}
-			else /* ReadyConsistencyModel == OPTIMISTIC_CONSISTENCY */
-			{
-				maxRoundId = PaxosMaxLocalConsensusRound(groupId);
-			}
-
-			if (maxAppliedRoundId < maxRoundId)
-			{
-				PaxosEnabled = false;
-				PaxosApplyLog(groupId, proposerId, maxRoundId);
-				PaxosEnabled = true;
-				CommandCounterIncrement();
-			}
+			PrepareConsistentRead(groupId, proposerId);
 		}
 
 		queryDesc->snapshot->curcid = GetCurrentCommandId(false);
@@ -197,15 +191,13 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 }
 
 
-
 /*
- * IsPgPaxosQuery returns whether the given query should be handled by pg_paxos.
+ * HasPaxosTable returns whether the given list of range tables contains
+ * a Paxos table.
  */
 static bool
-IsPgPaxosQuery(QueryDesc *queryDesc)
+HasPaxosTable(List *rangeTableList)
 {
-	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
-	List *rangeTableList = plannedStmt->rtable;
 	ListCell *rangeTableCell = NULL;
 
 	/* if the extension isn't created, it is never a Paxos query */
@@ -239,10 +231,8 @@ IsPgPaxosQuery(QueryDesc *queryDesc)
  * If more than one Paxos group is used, this function errors out.
  */
 static char *
-DeterminePaxosGroup(QueryDesc *queryDesc)
+DeterminePaxosGroup(List *rangeTableList)
 {
-	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
-	List *rangeTableList = plannedStmt->rtable;
 	ListCell *rangeTableCell = NULL;
 	char *queryGroupId = NULL;
 
@@ -295,6 +285,35 @@ GenerateProposerId(void)
 
 
 /*
+ * PrepareConsistentRead prepares the replicated tables in a Paxos group
+ * for a consistent read based on the configured consistency model.
+ */
+static void
+PrepareConsistentRead(char *groupId, char *proposerId)
+{
+	int64 maxRoundId = -1;
+	int64 maxAppliedRoundId = PaxosMaxAppliedRound(groupId);
+
+	if (ReadConsistencyModel == STRONG_CONSISTENCY)
+	{
+		maxRoundId = PaxosMaxAcceptedRound(groupId);
+	}
+	else /* ReadyConsistencyModel == OPTIMISTIC_CONSISTENCY */
+	{
+		maxRoundId = PaxosMaxLocalConsensusRound(groupId);
+	}
+
+	if (maxAppliedRoundId < maxRoundId)
+	{
+		PaxosEnabled = false;
+		PaxosApplyLog(groupId, proposerId, maxRoundId);
+		PaxosEnabled = true;
+		CommandCounterIncrement();
+	}
+}
+
+
+/*
  * FinishPaxosTransaction is called at the end of a transaction and
  * mainly serves to reset the PaxosEnabled flag in case of failure.
  */
@@ -307,4 +326,75 @@ FinishPaxosTransaction(XactEvent event, void *arg)
 	}
 	
 	PaxosEnabled = true;
+}
+
+
+/*
+ * PgPaxosProcessUtility intercepts utility statements and errors out for
+ * unsupported utility statements on paxos tables.
+ */
+static void
+PgPaxosProcessUtility(Node *parsetree, const char *queryString,
+					  ProcessUtilityContext context, ParamListInfo params,
+					  DestReceiver *dest, char *completionTag)
+{
+	NodeTag statementType = nodeTag(parsetree);
+	if (statementType == T_CopyStmt)
+	{
+		CopyStmt *copyStatement = (CopyStmt *) parsetree;
+		RangeVar *relation = copyStatement->relation;
+		Node *rawQuery = copyObject(copyStatement->query);
+
+		if (relation != NULL)
+		{
+			bool failOK = true;
+			Oid tableId = RangeVarGetRelid(relation, NoLock, failOK);
+			bool isPaxosTable = false;
+
+			Assert(rawQuery == NULL);
+
+			isPaxosTable = IsPaxosTable(tableId);
+			if (isPaxosTable)
+			{
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("COPY commands on paxos tables "
+									   "are unsupported")));
+			}
+		}
+		else if (rawQuery != NULL)
+		{
+			Query *parsedQuery = NULL;
+			List *queryList = pg_analyze_and_rewrite(rawQuery, queryString,
+													 NULL, 0);
+
+			Assert(relation == NULL);
+
+			if (list_length(queryList) != 1)
+			{
+				ereport(ERROR, (errmsg("unexpected rewrite result")));
+			}
+
+			parsedQuery = (Query *) linitial(queryList);
+
+			/* determine if the query runs on a paxos table */
+			if (HasPaxosTable(parsedQuery->rtable))
+			{
+				char *groupId = DeterminePaxosGroup(parsedQuery->rtable);
+				char *proposerId = GenerateProposerId();
+
+				PrepareConsistentRead(groupId, proposerId);
+			}
+		}
+	}
+
+	if (PreviousProcessUtilityHook != NULL)
+	{
+		PreviousProcessUtilityHook(parsetree, queryString, context,
+								   params, dest, completionTag);
+	}
+	else
+	{
+		standard_ProcessUtility(parsetree, queryString, context,
+								params, dest, completionTag);
+	}
 }
