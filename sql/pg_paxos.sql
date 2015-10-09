@@ -606,6 +606,7 @@ DECLARE
 BEGIN
 	-- We don't want multiple processes applying the same log
 	PERFORM pg_advisory_xact_lock(29030, hashtext(current_group_id));
+	SET pg_paxos.enabled TO false;
 
 	SELECT last_applied_round INTO current_round_id
 	FROM pgp_metadata.group
@@ -620,7 +621,7 @@ BEGIN
 		WHERE group_id = current_group_id AND round_id = current_round_id AND consensus;
 
 		IF NOT FOUND THEN
-			SELECT paxos(
+			SELECT * FROM paxos(
 						current_proposer_id,
 						current_group_id,
 						current_round_id,
@@ -632,6 +633,8 @@ BEGIN
 		BEGIN
 			EXECUTE query;
 		EXCEPTION WHEN others THEN
+			RAISE NOTICE 'Error: %', SQLERRM;
+
 			UPDATE pgp_metadata.round
 			SET error = SQLERRM
 			WHERE group_id = current_group_id AND round_id = current_round_id;
@@ -643,6 +646,7 @@ BEGIN
 	SET last_applied_round = max_round_id
 	WHERE group_id = current_group_id;
 
+	SET pg_paxos.enabled TO true;
 	RETURN max_round_id;
 END;
 $BODY$ LANGUAGE 'plpgsql';
@@ -785,7 +789,7 @@ BEGIN
 	majority_size = num_hosts / 2 + 1;
 
 	-- Try to open connections to a majority of hosts
-	SELECT paxos_open_connections(majority_size) INTO num_open_connections;
+	SELECT paxos_open_connections(num_hosts) INTO num_open_connections;
 
 	IF num_open_connections < majority_size THEN
 		PERFORM paxos_close_connections();

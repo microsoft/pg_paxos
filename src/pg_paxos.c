@@ -101,6 +101,11 @@ _PG_init(void)
 	PreviousProcessUtilityHook = ProcessUtility_hook;
 	ProcessUtility_hook = PgPaxosProcessUtility;
 
+	DefineCustomBoolVariable("pg_paxos.enabled",
+							 "If enabled, pg_paxos handles queries on Paxos tables",
+							 NULL, &PaxosEnabled, true, PGC_USERSET, 0, NULL, NULL,
+							 NULL);
+
 	DefineCustomStringVariable("pg_paxos.node_id",
 							   "Unique node ID to use in Paxos interactions", NULL,
 							   &PaxosNodeId, NULL, PGC_USERSET, 0, NULL,
