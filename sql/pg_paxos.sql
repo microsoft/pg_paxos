@@ -232,7 +232,6 @@ CREATE FUNCTION paxos(
 RETURNS paxos_result
 AS $BODY$
 DECLARE
-	applied_round bigint;
 	num_hosts int;
 	num_open_connections int;
 	majority_size int;
