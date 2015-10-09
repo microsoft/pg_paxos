@@ -44,8 +44,8 @@
 #include "utils/snapmgr.h"
 
 
-/* whether writes go through Paxos */
-static bool PaxosEnabled = true;
+/* declarations for dynamic loading */
+PG_MODULE_MAGIC;
 
 
 /* executor functions forward declarations */
@@ -54,12 +54,32 @@ static bool IsPgPaxosQuery(QueryDesc *queryDesc);
 static char *DeterminePaxosGroup(QueryDesc *queryDesc);
 static void FinishPaxosTransaction(XactEvent event, void *arg);
 
-/* declarations for dynamic loading */
-PG_MODULE_MAGIC;
 
+/* Enumeration that represents the consistency model to use */
+typedef enum
+{
+	STRONG_CONSISTENCY = 0,
+	OPTIMISTIC_CONSISTENCY = 1
+
+} ConsistencyModel;
+
+
+/* configuration options */
+static const struct config_enum_entry consistency_model_options[] = {
+	{"strong", STRONG_CONSISTENCY, false},
+	{"optimistic", OPTIMISTIC_CONSISTENCY, false},
+	{NULL, 0, false}
+};
+
+/* whether writes go through Paxos */
+static bool PaxosEnabled = true;
 
 /* saved hook values in case of unload */
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
+
+/**/
+static int ReadConsistencyModel = STRONG_CONSISTENCY;
+
 
 
 /*
@@ -77,6 +97,12 @@ _PG_init(void)
 							   "Unique node ID to use in Paxos interactions", NULL,
 							   &PaxosNodeId, NULL, PGC_USERSET, 0, NULL,
 							   NULL, NULL);
+
+	DefineCustomEnumVariable("pg_paxos.consistency_model",
+							 "Consistency model to use for reads (strong, optimistic)", 
+							 NULL, &ReadConsistencyModel, STRONG_CONSISTENCY,
+							 consistency_model_options, PGC_USERSET, 0, NULL, NULL,
+							 NULL);
 }
 
 
@@ -119,29 +145,10 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 			int64 loggedRoundId = 0;
 
 			/*
-			 * The PaxosApplyLog function will apply all SQL queries in the log
-			 * on which there is consensus.
+			 * Log the current query through Paxos.
 			 */
 			PaxosEnabled = false;
-			PaxosApplyLog(groupId, proposerId, true, 0);
-			PaxosEnabled = true;
-			CommandCounterIncrement();
-
-			/*
- 			 * Log the current query through Paxos. In the future, we will want to
- 			 * separately log a commit record, since we'd prefer not logging queries
- 			 * that fail.
- 			 */
-			loggedRoundId = PaxosLog(groupId, proposerId, sqlQuery);
-			CommandCounterIncrement();
-	
-			/*
-			 * The PaxosApplyLog function will apply all SQL queries in the log
-			 * on which there is consensus, except the current query (hence the
-			 * minus 1).
-			 */
-			PaxosEnabled = false;
-			PaxosApplyLog(groupId, proposerId, false, loggedRoundId - 1);
+			loggedRoundId = PaxosAppend(groupId, proposerId, sqlQuery);
 			PaxosEnabled = true;
 			CommandCounterIncrement();
 
@@ -154,14 +161,25 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 		}
 		else
 		{
-			/*
-			 * The PaxosApplyLog function will apply all SQL queries in the log
-			 * on which there is consensus.
-			 */
-			PaxosEnabled = false;
-			PaxosApplyLog(groupId, proposerId, true, 0);
-			PaxosEnabled = true;
-			CommandCounterIncrement();
+			int64 maxRoundId = -1;
+			int64 maxAppliedRoundId = PaxosMaxAppliedRound(groupId);
+
+			if (ReadConsistencyModel == STRONG_CONSISTENCY)
+			{
+				maxRoundId = PaxosMaxAcceptedRound(groupId);
+			}
+			else /* ReadyConsistencyModel == OPTIMISTIC_CONSISTENCY */
+			{
+				maxRoundId = PaxosMaxLocalConsensusRound(groupId);
+			}
+
+			if (maxAppliedRoundId < maxRoundId)
+			{
+				PaxosEnabled = false;
+				PaxosApplyLog(groupId, proposerId, maxRoundId);
+				PaxosEnabled = true;
+				CommandCounterIncrement();
+			}
 		}
 
 		queryDesc->snapshot->curcid = GetCurrentCommandId(false);

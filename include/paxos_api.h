@@ -14,9 +14,11 @@
 
 
 /* function declarations to run Paxos */
-extern int64 PaxosLog(char *groupId, char *proposerId, char* value);
-extern int64 PaxosApplyLog(char *groupId, char *proposerId, bool findLatest,
-						   int64 maxRoundId);
+extern int64 PaxosAppend(char *groupId, char *proposerId, char* value);
+extern int64 PaxosMaxAppliedRound(char *groupId);
+extern int64 PaxosMaxLocalConsensusRound(char *groupId);
+extern int64 PaxosMaxAcceptedRound(char *groupId);
+extern int64 PaxosApplyLog(char *groupId, char *proposerId, int64 maxRoundId);
 extern void PaxosSetApplied(char *groupId, int64 appliedRoundId);
 
 #endif /* PG_PAXOS_API_H */
