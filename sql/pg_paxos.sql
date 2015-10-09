@@ -546,7 +546,7 @@ DECLARE
 	majority_size int;
 	round_query text;
 	max_round_id bigint := -1;
-	num_responses := 0;
+	num_responses int := 0;
 	remote_round_id bigint;
 	host record;
 BEGIN
@@ -683,7 +683,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE FUNCTION paxos_add_host(
-							proposer_id text,
+							current_proposer_id text,
 							current_group_id text,
 							hostname text,
 							port int)
@@ -705,13 +705,13 @@ BEGIN
 
 		current_round_id := current_round_id + 1;
 
-		proposed_value := format('INSERT INTO pgp_metadata.hosts VALUES (%s,%s,%d,%d)',
+		proposed_value := format('INSERT INTO pgp_metadata.host VALUES (%s,%s,%s,%s)',
 								 quote_literal(current_group_id),
 								 quote_literal(hostname),
 								 port,
 								 current_round_id+1);
 		SELECT paxos(
-						proposer_id,
+						current_proposer_id,
 						current_group_id,
 						current_round_id,
 						proposed_value) INTO accepted_value, value_written;
@@ -723,7 +723,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 CREATE FUNCTION paxos_remove_host(
-							proposer_id text,
+							current_proposer_id text,
 							current_group_id text,
 							hostname text,
 							port int)
@@ -745,18 +745,18 @@ BEGIN
 
 		current_round_id := current_round_id + 1;
 
-		proposed_value := format('UPDATE pgp_metadata.hosts '||
-								 'SET max_round_id = %d '||
+		proposed_value := format('UPDATE pgp_metadata.host '||
+								 'SET max_round_id = %s '||
 								 'WHERE group_id = %s '||
 								 'AND node_name = %s '||
-								 'AND node_port = %d',
+								 'AND node_port = %s',
 								 current_round_id,
 								 quote_literal(current_group_id),
 								 quote_literal(hostname),
 								 port);
 
 		SELECT paxos(
-						proposer_id,
+						current_proposer_id,
 						current_group_id,
 						current_round_id,
 						proposed_value) INTO accepted_value, value_written;
@@ -826,7 +826,8 @@ BEGIN
 	FROM pgp_metadata.host
 	WHERE group_id = current_group_id
 	  AND min_round_id <= current_round_id
-	  AND (max_round_id IS NULL OR current_round_id <= max_round_id);
+	  AND (max_round_id IS NULL OR current_round_id <= max_round_id)
+	GROUP BY node_name, node_port;
 
 	SELECT count(*) INTO num_hosts FROM hosts;
 
