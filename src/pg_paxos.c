@@ -52,7 +52,9 @@ PG_MODULE_MAGIC;
 static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
 static bool HasPaxosTable(List *rangeTableList);
 static char *DeterminePaxosGroup(List *rangeTableList);
-static void PrepareConsistentRead(char *groupId, char *proposerId);
+static Oid ExtractTableOid(Node *node);
+static void PrepareConsistentWrite(char *groupId, const char *sqlQuery);
+static void PrepareConsistentRead(char *groupId);
 static void FinishPaxosTransaction(XactEvent event, void *arg);
 static void PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 								  ProcessUtilityContext context, ParamListInfo params,
@@ -112,7 +114,7 @@ _PG_init(void)
 							   NULL, NULL);
 
 	DefineCustomEnumVariable("pg_paxos.consistency_model",
-							 "Consistency model to use for reads (strong, optimistic)", 
+							 "Consistency model to use for reads (strong, optimistic)",
 							 NULL, &ReadConsistencyModel, STRONG_CONSISTENCY,
 							 consistency_model_options, PGC_USERSET, 0, NULL, NULL,
 							 NULL);
@@ -141,44 +143,27 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
 	List *rangeTableList = plannedStmt->rtable;
+	CmdType commandType = queryDesc->operation;
 
 	if (PaxosEnabled && HasPaxosTable(rangeTableList))
 	{
-		CmdType commandType = queryDesc->operation;
 		char *sqlQuery = (char *) queryDesc->sourceText;
-		char *groupId = NULL; 
-		char *proposerId = NULL;
+		char *groupId = NULL;
 		bool topLevel = true;
 
 		/* disallow transactions during paxos commands */
 		PreventTransactionChain(topLevel, "paxos commands");
 
 		groupId = DeterminePaxosGroup(rangeTableList);
-		proposerId = GenerateProposerId();
 
 		if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
 			commandType == CMD_DELETE)
 		{
-			int64 loggedRoundId = 0;
-
-			/*
-			 * Log the current query through Paxos.
-			 */
-			PaxosEnabled = false;
-			loggedRoundId = PaxosAppend(groupId, proposerId, sqlQuery);
-			PaxosEnabled = true;
-			CommandCounterIncrement();
-
-			/* 
-			 * Mark the current query as applied and let the regular executor handle
-			 * it. This change is rolled back if the current query fails.
-			 */
-			PaxosSetApplied(groupId, loggedRoundId);
-			CommandCounterIncrement();
+			PrepareConsistentWrite(groupId, sqlQuery);
 		}
 		else
 		{
-			PrepareConsistentRead(groupId, proposerId);
+			PrepareConsistentRead(groupId);
 		}
 
 		queryDesc->snapshot->curcid = GetCurrentCommandId(false);
@@ -220,8 +205,8 @@ HasPaxosTable(List *rangeTableList)
 
 	foreach(rangeTableCell, rangeTableList)
 	{
-		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
-		if (IsPaxosTable(rangeTableEntry->relid))
+		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
+		if (IsPaxosTable(rangeTableOid))
 		{
 			return true;
 		}
@@ -232,7 +217,7 @@ HasPaxosTable(List *rangeTableList)
 
 
 /*
- * DeterminePaxosGroup determines the paxos group for the given query.
+ * DeterminePaxosGroup determines the paxos group for the given list of relations.
  * If more than one Paxos group is used, this function errors out.
  */
 static char *
@@ -243,8 +228,7 @@ DeterminePaxosGroup(List *rangeTableList)
 
 	foreach(rangeTableCell, rangeTableList)
 	{
-		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
-		Oid rangeTableOid = rangeTableEntry->relid;
+		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
 		char *tableGroupId = PaxosTableGroup(rangeTableOid);
 
 		if (queryGroupId == NULL)
@@ -264,6 +248,31 @@ DeterminePaxosGroup(List *rangeTableList)
 	}
 
 	return queryGroupId;
+}
+
+
+/*
+ * ExtractTableOid attempts to extract a table OID from a node.
+ */
+static Oid
+ExtractTableOid(Node *node)
+{
+	Oid tableOid = InvalidOid;
+
+	NodeTag nodeType = nodeTag(node);
+	if (nodeType == T_RangeTblEntry)
+	{
+		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) node;
+		tableOid = rangeTableEntry->relid;
+	}
+	else if(nodeType == T_RangeVar)
+	{
+		RangeVar *rangeVar = (RangeVar *) node;
+		bool failOK = true;
+		tableOid = RangeVarGetRelid(rangeVar, NoLock, failOK);
+	}
+
+	return tableOid;
 }
 
 
@@ -290,14 +299,42 @@ GenerateProposerId(void)
 
 
 /*
+ * PrepareConsistentWrite prepares a write for execution. After
+ * calling this function the write can be executed.
+ */
+static void
+PrepareConsistentWrite(char *groupId, const char *sqlQuery)
+{
+	int64 loggedRoundId = 0;
+	char *proposerId = GenerateProposerId();
+
+	/*
+	 * Log the current query through Paxos.
+	 */
+	PaxosEnabled = false;
+	loggedRoundId = PaxosAppend(groupId, proposerId, sqlQuery);
+	PaxosEnabled = true;
+	CommandCounterIncrement();
+
+	/*
+	 * Mark the current query as applied and let the regular executor handle
+	 * it. This change is rolled back if the current query fails.
+	 */
+	PaxosSetApplied(groupId, loggedRoundId);
+	CommandCounterIncrement();
+}
+
+
+/*
  * PrepareConsistentRead prepares the replicated tables in a Paxos group
  * for a consistent read based on the configured consistency model.
  */
 static void
-PrepareConsistentRead(char *groupId, char *proposerId)
+PrepareConsistentRead(char *groupId)
 {
 	int64 maxRoundId = -1;
 	int64 maxAppliedRoundId = PaxosMaxAppliedRound(groupId);
+	char *proposerId = GenerateProposerId();
 
 	if (ReadConsistencyModel == STRONG_CONSISTENCY)
 	{
@@ -344,50 +381,68 @@ PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 					  DestReceiver *dest, char *completionTag)
 {
 	NodeTag statementType = nodeTag(parsetree);
-	if (statementType == T_CopyStmt)
+
+	if (PaxosEnabled)
 	{
-		CopyStmt *copyStatement = (CopyStmt *) parsetree;
-		RangeVar *relation = copyStatement->relation;
-		Node *rawQuery = copyObject(copyStatement->query);
-
-		if (relation != NULL)
+		if (statementType == T_TruncateStmt)
 		{
-			bool failOK = true;
-			Oid tableId = RangeVarGetRelid(relation, NoLock, failOK);
-			bool isPaxosTable = false;
+			TruncateStmt *truncateStatement = (TruncateStmt *) parsetree;
+			List *relations = truncateStatement->relations;
 
-			Assert(rawQuery == NULL);
+			if (HasPaxosTable(relations))
+			{
+				char *groupId = DeterminePaxosGroup(relations);
 
-			isPaxosTable = IsPaxosTable(tableId);
-			if (isPaxosTable)
+				PrepareConsistentWrite(groupId, queryString);
+			}
+		}
+		else if (statementType == T_AlterTableStmt)
+		{
+			AlterTableStmt *alterStatement = (AlterTableStmt *) parsetree;
+			Oid tableOid = ExtractTableOid((Node *) alterStatement->relation);
+			if (IsPaxosTable(tableOid))
 			{
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("COPY commands on paxos tables "
+								errmsg("ALTER TABLE commands on paxos tables "
 									   "are unsupported")));
 			}
 		}
-		else if (rawQuery != NULL)
+		else if (statementType == T_CopyStmt)
 		{
-			Query *parsedQuery = NULL;
-			List *queryList = pg_analyze_and_rewrite(rawQuery, queryString,
-													 NULL, 0);
+			CopyStmt *copyStatement = (CopyStmt *) parsetree;
+			RangeVar *relation = copyStatement->relation;
+			Node *rawQuery = copyObject(copyStatement->query);
 
-			Assert(relation == NULL);
-
-			if (list_length(queryList) != 1)
+			if (relation != NULL)
 			{
-				ereport(ERROR, (errmsg("unexpected rewrite result")));
+				Oid tableOid = ExtractTableOid((Node *) relation);
+				if (IsPaxosTable(tableOid))
+				{
+					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									errmsg("COPY commands on paxos tables "
+										   "are unsupported")));
+				}
 			}
-
-			parsedQuery = (Query *) linitial(queryList);
-
-			/* determine if the query runs on a paxos table */
-			if (HasPaxosTable(parsedQuery->rtable))
+			else if (rawQuery != NULL)
 			{
-				char *groupId = DeterminePaxosGroup(parsedQuery->rtable);
-				char *proposerId = GenerateProposerId();
+				Query *parsedQuery = NULL;
+				List *queryList = pg_analyze_and_rewrite(rawQuery, queryString,
+														 NULL, 0);
 
-				PrepareConsistentRead(groupId, proposerId);
+				if (list_length(queryList) != 1)
+				{
+					ereport(ERROR, (errmsg("unexpected rewrite result")));
+				}
+
+				parsedQuery = (Query *) linitial(queryList);
+
+				/* determine if the query runs on a paxos table */
+				if (HasPaxosTable(parsedQuery->rtable))
+				{
+					char *groupId = DeterminePaxosGroup(parsedQuery->rtable);
+
+					PrepareConsistentRead(groupId);
+				}
 			}
 		}
 	}

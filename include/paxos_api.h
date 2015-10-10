@@ -14,7 +14,7 @@
 
 
 /* function declarations to run Paxos */
-extern int64 PaxosAppend(char *groupId, char *proposerId, char* value);
+extern int64 PaxosAppend(char *groupId, char *proposerId, const char* value);
 extern int64 PaxosMaxAppliedRound(char *groupId);
 extern int64 PaxosMaxLocalConsensusRound(char *groupId);
 extern int64 PaxosMaxAcceptedRound(char *groupId);

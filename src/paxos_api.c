@@ -25,7 +25,7 @@
 
 
 int64
-PaxosAppend(char *groupId, char *proposerId, char* value)
+PaxosAppend(char *groupId, char *proposerId, const char* value)
 {
 	int roundId = -1;
 	Datum roundIdDatum = 0;

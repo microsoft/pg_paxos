@@ -120,7 +120,9 @@ IsPaxosTable(Oid tableOid)
 	 * that and short-circuit, we'll get infinite recursion in the planner.
 	 */
 	tableMetadataTableOid = get_relname_relid("replicated_tables", metadataNamespaceOid);
-	if (IsSystemNamespace(tableNamespaceOid) || tableOid == tableMetadataTableOid)
+	if (IsSystemNamespace(tableNamespaceOid) ||
+		tableOid == tableMetadataTableOid ||
+		tableMetadataTableOid == InvalidOid)
 	{
 		return false;
 	}
