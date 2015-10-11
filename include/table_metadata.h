@@ -19,6 +19,6 @@
 /* function declarations to access and manipulate the metadata */
 extern char *PaxosTableGroup(Oid paxosTableOid);
 extern bool IsPaxosTable(Oid tableId);
-extern bool PaxosTablesExist(void);
+
 
 #endif /* PG_PAXOS_TABLE_METADATA_H */

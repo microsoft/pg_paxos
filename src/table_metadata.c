@@ -22,6 +22,7 @@
 
 #include "access/attnum.h"
 #include "access/htup.h"
+#include "access/htup_details.h"
 #include "access/tupdesc.h"
 #include "executor/spi.h"
 #include "catalog/catalog.h"
@@ -36,9 +37,20 @@
 #include "utils/builtins.h"
 #include "utils/elog.h"
 #include "utils/errcodes.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
+#include "utils/tqual.h"
+
+
+#define METADATA_SCHEMA_NAME "pgp_metadata"
+#define REPLICATED_TABLES_TABLE_NAME "replicated_tables"
+
+/* human-readable names for addressing columns of partition table */
+#define REPLICATED_TABLES_TABLE_ATTRIBUTE_COUNT 2
+#define ATTR_NUM_REPLICATED_TABLES_RELATION_ID 1
+#define ATTR_NUM_REPLICATED_TABLES_GROUP 2
 
 
 /*
@@ -48,47 +60,39 @@ char *
 PaxosTableGroup(Oid paxosTableOid)
 {
 	char *groupId = NULL;
-	Datum groupIdDatum = 0;
-	Oid argTypes[] = { OIDOID };
-	Datum argValues[] = { paxosTableOid };
-	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
-	bool isNull = false;
+	RangeVar *heapRangeVar = NULL;
+	Relation heapRelation = NULL;
+	HeapScanDesc scanDesc = NULL;
+	const int scanKeyCount = 1;
+	ScanKeyData scanKey[scanKeyCount];
+	HeapTuple heapTuple = NULL;
 
+	heapRangeVar = makeRangeVar(METADATA_SCHEMA_NAME, REPLICATED_TABLES_TABLE_NAME, -1);
+	heapRelation = relation_openrv(heapRangeVar, AccessShareLock);
 
-	/*
-	 * SPI_connect switches to its own memory context, which is destroyed by
-	 * the call to SPI_finish. SPI_palloc is provided to allocate memory in
-	 * the previous ("upper") context, but that is inadequate when we need to
-	 * call other functions that themselves use the normal palloc (such as
-	 * lappend). So we switch to the upper context ourselves as needed.
-	 */
-	MemoryContext upperContext = CurrentMemoryContext, oldContext = NULL;
+	ScanKeyInit(&scanKey[0], ATTR_NUM_REPLICATED_TABLES_RELATION_ID, InvalidStrategy,
+				F_OIDEQ, ObjectIdGetDatum(paxosTableOid));
 
-	SPI_connect();
+	scanDesc = heap_beginscan(heapRelation, SnapshotSelf, scanKeyCount, scanKey);
 
-	spiStatus = SPI_execute_with_args("SELECT group_id "
-									  "FROM pgp_metadata.replicated_tables "
-									  "WHERE table_oid = $1",
-									  1, argTypes, argValues, NULL, false, 1);
-	Assert(spiStatus == SPI_OK_SELECT);
-
-	if (SPI_processed != 1)
+	heapTuple = heap_getnext(scanDesc, ForwardScanDirection);
+	if (HeapTupleIsValid(heapTuple))
 	{
-		char *relationName = get_rel_name(paxosTableOid);
+		TupleDesc tupleDescriptor = RelationGetDescr(heapRelation);
+		bool isNull = false;
 
-		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
-						errmsg("no group id is defined for relation \"%s\"",
-							   relationName)));
+		Datum groupIdDatum = heap_getattr(heapTuple,
+										  ATTR_NUM_REPLICATED_TABLES_GROUP,
+										  tupleDescriptor, &isNull);
+		groupId = TextDatumGetCString(groupIdDatum);
+	}
+	else
+	{
+		groupId = NULL;
 	}
 
-	groupIdDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1,
-								 &isNull);
-
-	oldContext = MemoryContextSwitchTo(upperContext);
-	groupId = TextDatumGetCString(groupIdDatum);
-	MemoryContextSwitchTo(oldContext);
-
-	SPI_finish();
+	heap_endscan(scanDesc);
+	relation_close(heapRelation, AccessShareLock);
 
 	return groupId;
 }
@@ -102,65 +106,27 @@ bool
 IsPaxosTable(Oid tableOid)
 {
 	bool isPaxosTable = false;
-	Oid metadataNamespaceOid = get_namespace_oid("pgp_metadata", false);
-	Oid tableNamespaceOid = get_rel_namespace(tableOid);
-	Oid tableMetadataTableOid = InvalidOid;
-	Oid argTypes[] = { OIDOID };
-	Datum argValues[] = { tableOid };
-	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
+	RangeVar *heapRangeVar = NULL;
+	Relation heapRelation = NULL;
+	HeapScanDesc scanDesc = NULL;
+	const int scanKeyCount = 1;
+	ScanKeyData scanKey[scanKeyCount];
+	HeapTuple heapTuple = NULL;
 
-	/* short-circuit if the input is invalid */
-	if (tableOid == InvalidOid)
-	{
-		return false;
-	}
+	heapRangeVar = makeRangeVar(METADATA_SCHEMA_NAME, REPLICATED_TABLES_TABLE_NAME, -1);
+	heapRelation = relation_openrv(heapRangeVar, AccessShareLock);
 
-	/*
-	 * The query below hits the replicated_tables table, so if we don't detect
-	 * that and short-circuit, we'll get infinite recursion in the planner.
-	 */
-	tableMetadataTableOid = get_relname_relid("replicated_tables", metadataNamespaceOid);
-	if (IsSystemNamespace(tableNamespaceOid) ||
-		tableOid == tableMetadataTableOid ||
-		tableMetadataTableOid == InvalidOid)
-	{
-		return false;
-	}
+	ScanKeyInit(&scanKey[0], ATTR_NUM_REPLICATED_TABLES_RELATION_ID, InvalidStrategy,
+				F_OIDEQ, ObjectIdGetDatum(tableOid));
 
-	SPI_connect();
+	scanDesc = heap_beginscan(heapRelation, SnapshotSelf, scanKeyCount, scanKey);
 
-	spiStatus = SPI_execute_with_args("SELECT 1 "
-									  "FROM pgp_metadata.replicated_tables "
-									  "WHERE table_oid = $1",
-									  1, argTypes, argValues, NULL, true, 1);
-	Assert(spiStatus == SPI_OK_SELECT);
+	heapTuple = heap_getnext(scanDesc, ForwardScanDirection);
 
-	isPaxosTable = (SPI_processed == 1);
+	isPaxosTable = HeapTupleIsValid(heapTuple);
 
-	SPI_finish();
+	heap_endscan(scanDesc);
+	relation_close(heapRelation, AccessShareLock);
 
 	return isPaxosTable;
-}
-
-
-/*
- *  PaxosTablesExist returns true if pg_paxos has a record of any
- *  paxos tables; otherwise this function returns false.
- */
-bool
-PaxosTablesExist(void)
-{
-	bool paxosTablesExist = false;
-	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
-
-	SPI_connect();
-
-	spiStatus = SPI_exec("SELECT NULL FROM pgp_metadata.replicated_tables", 1);
-	Assert(spiStatus == SPI_OK_SELECT);
-
-	paxosTablesExist = (SPI_processed > 0);
-
-	SPI_finish();
-
-	return paxosTablesExist;
 }

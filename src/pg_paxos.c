@@ -40,6 +40,7 @@
 #include "nodes/pg_list.h"
 #include "tcop/dest.h"
 #include "tcop/utility.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
@@ -231,7 +232,14 @@ DeterminePaxosGroup(List *rangeTableList)
 		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
 		char *tableGroupId = PaxosTableGroup(rangeTableOid);
 
-		if (queryGroupId == NULL)
+		if (tableGroupId == NULL)
+		{
+			char *relationName = get_rel_name(rangeTableOid);
+			ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+						   errmsg("relation \"%s\" is not managed by pg_paxos",
+						   relationName)));
+		}
+		else if (queryGroupId == NULL)
 		{
 			queryGroupId = tableGroupId;
 		}
@@ -380,10 +388,9 @@ PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 					  ProcessUtilityContext context, ParamListInfo params,
 					  DestReceiver *dest, char *completionTag)
 {
-	NodeTag statementType = nodeTag(parsetree);
-
 	if (PaxosEnabled)
 	{
+		NodeTag statementType = nodeTag(parsetree);
 		if (statementType == T_TruncateStmt)
 		{
 			TruncateStmt *truncateStatement = (TruncateStmt *) parsetree;
@@ -392,6 +399,17 @@ PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 			if (HasPaxosTable(relations))
 			{
 				char *groupId = DeterminePaxosGroup(relations);
+
+				PrepareConsistentWrite(groupId, queryString);
+			}
+		}
+		else if (statementType == T_IndexStmt)
+		{
+			IndexStmt *indexStatement = (IndexStmt *) parsetree;
+			Oid tableOid = ExtractTableOid((Node *) indexStatement->relation);
+			if (IsPaxosTable(tableOid))
+			{
+				char *groupId = PaxosTableGroup(tableOid);
 
 				PrepareConsistentWrite(groupId, queryString);
 			}
