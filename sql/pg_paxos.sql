@@ -606,7 +606,7 @@ DECLARE
 BEGIN
 	-- We don't want multiple processes applying the same log
 	PERFORM pg_advisory_xact_lock(29030, hashtext(current_group_id));
-	SET LOCAL pg_paxos.enabled TO false;
+	SET pg_paxos.enabled TO false;
 
 	SELECT last_applied_round INTO current_round_id
 	FROM pgp_metadata.group
@@ -644,7 +644,7 @@ BEGIN
 	SET last_applied_round = max_round_id
 	WHERE group_id = current_group_id;
 
-	SET LOCAL pg_paxos.enabled TO true;
+	SET pg_paxos.enabled TO true;
 	RETURN max_round_id;
 END;
 $BODY$ LANGUAGE 'plpgsql';

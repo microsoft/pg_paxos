@@ -15,6 +15,7 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 
+#include "pg_paxos.h"
 #include "table_metadata.h"
 
 #include <stddef.h>
@@ -28,6 +29,7 @@
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "nodes/makefuncs.h"
 #include "nodes/memnodes.h"
 #include "nodes/pg_list.h"
@@ -43,9 +45,6 @@
 #include "utils/palloc.h"
 #include "utils/tqual.h"
 
-
-#define METADATA_SCHEMA_NAME "pgp_metadata"
-#define REPLICATED_TABLES_TABLE_NAME "replicated_tables"
 
 /* human-readable names for addressing columns of partition table */
 #define REPLICATED_TABLES_TABLE_ATTRIBUTE_COUNT 2
@@ -67,7 +66,8 @@ PaxosTableGroup(Oid paxosTableOid)
 	ScanKeyData scanKey[scanKeyCount];
 	HeapTuple heapTuple = NULL;
 
-	heapRangeVar = makeRangeVar(METADATA_SCHEMA_NAME, REPLICATED_TABLES_TABLE_NAME, -1);
+	heapRangeVar = makeRangeVar(PG_PAXOS_METADATA_SCHEMA_NAME,
+								REPLICATED_TABLES_TABLE_NAME, -1);
 	heapRelation = relation_openrv(heapRangeVar, AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], ATTR_NUM_REPLICATED_TABLES_RELATION_ID, InvalidStrategy,
@@ -113,7 +113,13 @@ IsPaxosTable(Oid tableOid)
 	ScanKeyData scanKey[scanKeyCount];
 	HeapTuple heapTuple = NULL;
 
-	heapRangeVar = makeRangeVar(METADATA_SCHEMA_NAME, REPLICATED_TABLES_TABLE_NAME, -1);
+	if (tableOid == InvalidOid)
+	{
+		return false;
+	}
+
+	heapRangeVar = makeRangeVar(PG_PAXOS_METADATA_SCHEMA_NAME,
+								REPLICATED_TABLES_TABLE_NAME, -1);
 	heapRelation = relation_openrv(heapRangeVar, AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], ATTR_NUM_REPLICATED_TABLES_RELATION_ID, InvalidStrategy,

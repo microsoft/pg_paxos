@@ -15,12 +15,13 @@
 
 /* extension name used to determine if extension has been created */
 #define PG_PAXOS_EXTENSION_NAME "pg_paxos"
-
+#define PG_PAXOS_METADATA_SCHEMA_NAME "pgp_metadata"
+#define REPLICATED_TABLES_TABLE_NAME "replicated_tables"
 #define MAX_PAXOS_GROUP_ID_LENGTH 128
 
 
 /* configuration parameter that specifies a unique node ID */
-char *PaxosNodeId = NULL;
+extern char *PaxosNodeId;
 
 
 /* function declarations for extension loading and unloading */

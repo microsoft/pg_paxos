@@ -52,6 +52,7 @@ PG_MODULE_MAGIC;
 /* executor functions forward declarations */
 static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
 static bool HasPaxosTable(List *rangeTableList);
+static bool IsPgPaxosActive(void);
 static char *DeterminePaxosGroup(List *rangeTableList);
 static Oid ExtractTableOid(Node *node);
 static void PrepareConsistentWrite(char *groupId, const char *sqlQuery);
@@ -81,12 +82,15 @@ static const struct config_enum_entry consistency_model_options[] = {
 /* whether writes go through Paxos */
 static bool PaxosEnabled = true;
 
+/* whether writes go through Paxos */
+char *PaxosNodeId = NULL;
+
+/* consistency model for reads */
+static int ReadConsistencyModel = STRONG_CONSISTENCY;
+
 /* saved hook values in case of unload */
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
-
-/**/
-static int ReadConsistencyModel = STRONG_CONSISTENCY;
 
 
 
@@ -119,6 +123,8 @@ _PG_init(void)
 							 NULL, &ReadConsistencyModel, STRONG_CONSISTENCY,
 							 consistency_model_options, PGC_USERSET, 0, NULL, NULL,
 							 NULL);
+
+	RegisterXactCallback(FinishPaxosTransaction, NULL);
 }
 
 
@@ -131,8 +137,6 @@ _PG_fini(void)
 {
 	ProcessUtility_hook = PreviousProcessUtilityHook;
 	ExecutorStart_hook = PreviousExecutorStartHook;
-
-	RegisterXactCallback(FinishPaxosTransaction, NULL);
 }
 
 
@@ -146,7 +150,7 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 	List *rangeTableList = plannedStmt->rtable;
 	CmdType commandType = queryDesc->operation;
 
-	if (PaxosEnabled && HasPaxosTable(rangeTableList))
+	if (IsPgPaxosActive() && HasPaxosTable(rangeTableList))
 	{
 		char *sqlQuery = (char *) queryDesc->sourceText;
 		char *groupId = NULL;
@@ -216,6 +220,43 @@ HasPaxosTable(List *rangeTableList)
 	return false;
 }
 
+
+/*
+ * IsPgPaxosActive returns whether pg_paxos should intercept queries.
+ */
+static bool
+IsPgPaxosActive(void)
+{
+	bool missingOK = true;
+	Oid extensionOid = InvalidOid;
+	Oid metadataNamespaceOid = InvalidOid;
+	Oid tableMetadataTableOid = InvalidOid;
+
+	if (!PaxosEnabled)
+	{
+		return false;
+	}
+
+	extensionOid = get_extension_oid(PG_PAXOS_EXTENSION_NAME, missingOK);
+	if (extensionOid == InvalidOid)
+	{
+		return false;
+	}
+
+	metadataNamespaceOid = get_namespace_oid("pgp_metadata", true);
+	if (metadataNamespaceOid == InvalidOid)
+	{
+		return false;
+	}
+
+	tableMetadataTableOid = get_relname_relid("replicated_tables", metadataNamespaceOid);
+	if (tableMetadataTableOid == InvalidOid)
+	{
+		return false;
+	}
+
+	return true;
+}
 
 /*
  * DeterminePaxosGroup determines the paxos group for the given list of relations.
@@ -388,7 +429,7 @@ PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 					  ProcessUtilityContext context, ParamListInfo params,
 					  DestReceiver *dest, char *completionTag)
 {
-	if (PaxosEnabled)
+	if (IsPgPaxosActive())
 	{
 		NodeTag statementType = nodeTag(parsetree);
 		if (statementType == T_TruncateStmt)
