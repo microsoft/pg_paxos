@@ -100,7 +100,7 @@ PaxosMaxLocalConsensusRound(char *groupId)
 
 	SPI_connect();
 
-	SPI_execute_with_args("SELECT max(round_id) FROM pgp_metadata.round "
+	SPI_execute_with_args("SELECT max(round_num) FROM pgp_metadata.round "
 						  "WHERE group_id = $1 AND consensus",
 						  1, argTypes, argValues, NULL, false, 1);
 
