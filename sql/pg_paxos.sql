@@ -348,7 +348,7 @@ BEGIN
 		HAVING count(*) >= majority_size;
 
 		IF FOUND THEN
-			IF accepted_value_id <> initial_value_id AND accepted_value <> initial_value THEN
+			IF accepted_value_id <> initial_value_id OR accepted_value <> initial_value THEN
 				/* There is consensus on someone else's value */
 				value_changed := true;
 			ELSE
@@ -384,7 +384,7 @@ BEGIN
 			/* A value was already accepted, I change my proposal to this value */
 
 			IF max_prepare_response.value_id <> initial_value_id
-			AND max_prepare_response.value <> initial_value THEN
+			OR max_prepare_response.value <> initial_value THEN
 				/* I will use a value from a different proposer */
 				value_changed := true;
 			ELSE
