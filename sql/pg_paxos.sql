@@ -25,7 +25,7 @@ CREATE SCHEMA pgp_metadata
 		round_id bigint not null,
 		min_proposal_id bigint not null,
 		proposer_id text not null,
-		value_proposer_id text,
+		value_id text,
 		value text,
 		consensus bool not null default false,
 		error text,
@@ -47,7 +47,7 @@ CREATE TYPE prepare_response AS (
 	promised boolean,
 	proposer_id text,
 	proposal_id bigint,
-	value_proposer_id text,
+	value_id text,
 	value text
 );
 
@@ -127,12 +127,12 @@ BEGIN
 			proposer_id = current_proposer_id
 		WHERE group_id = current_group_id AND round_id = current_round_id;
 
-		SELECT true, current_proposer_id, current_proposal_id, round.value_proposer_id, round.value INTO response;
+		SELECT true, current_proposer_id, current_proposal_id, round.value_id, round.value INTO response;
 
 	ELSE
 		-- I've seen a prepare request with a higher ID (or same) for this proposal
 
-		SELECT false, round.proposer_id, round.min_proposal_id, round.value_proposer_id, round.value INTO response;
+		SELECT false, round.proposer_id, round.min_proposal_id, round.value_id, round.value INTO response;
 	END IF;
 
 	RETURN response;
@@ -146,6 +146,7 @@ CREATE FUNCTION paxos_request_accept(
 							   current_group_id text,
 							   current_round_id bigint,
 							   current_proposal_id bigint,
+							   proposed_value_id text,
 							   proposed_value text)
 RETURNS accept_response
 AS $BODY$
@@ -172,7 +173,7 @@ BEGIN
 
 		UPDATE pgp_metadata.round
 		SET "value" = proposed_value,
-			"value_proposer_id" = current_proposer_id
+			"value_id" = proposed_value_id
 		WHERE group_id = current_group_id AND round_id = current_round_id;
 
 		SELECT true, current_proposal_id INTO response;
@@ -193,6 +194,7 @@ CREATE FUNCTION paxos_confirm_consensus(
 							current_group_id text,
 							current_round_id bigint,
 							accepted_proposal_id bigint,
+							accepted_value_id text,
 							accepted_value text)
 RETURNS boolean
 AS $BODY$
@@ -202,7 +204,7 @@ BEGIN
 	UPDATE pgp_metadata.round
 	SET consensus = true,
 		min_proposal_id = accepted_proposal_id,
-		value_proposer_id = current_proposer_id,
+		value_id = accepted_value_id,
 		value = accepted_value
 	WHERE group_id = current_group_id AND round_id = current_round_id;
 
@@ -231,7 +233,10 @@ DECLARE
 	num_accept_responses int;
 	max_accept_response accept_response;
 	num_accepted int;
-	accepted_proposer_id text;
+	initial_value text := proposed_value;
+	initial_value_id text := current_proposer_id;
+	proposed_value_id text := initial_value_id;
+	accepted_value_id text;
 	accepted_value text;
 	value_changed boolean := false;
 	start_time double precision := extract(EPOCH FROM clock_timestamp());
@@ -248,7 +253,7 @@ BEGIN
 		promised boolean,
 		proposer_id text,
 		proposal_id bigint,
-		value_proposer_id text,
+		value_id text,
 		value text
 	);
 
@@ -289,23 +294,25 @@ BEGIN
 		END IF;
 
 		-- Find whether consensus was already reached
-		SELECT value_proposer_id, value INTO accepted_proposer_id, accepted_value
+		SELECT value_id, value INTO accepted_value_id, accepted_value
 		FROM prepare_responses
-		WHERE value_proposer_id IS NOT NULL
-		GROUP BY value_proposer_id, value
+		WHERE value_id IS NOT NULL
+		GROUP BY value_id, value
 		HAVING count(*) >= majority_size;
 
 		IF FOUND THEN
-			proposed_value := accepted_value;
-			inform_learners := false;
-
-			IF accepted_proposer_id <> current_proposer_id THEN
+			IF accepted_value_id <> initial_value_id AND accepted_value <> initial_value THEN
 				-- There is consensus on someone else's value
 				value_changed := true;
 			ELSE
 				-- It's actually my value, apparently I already had consensus on it
 				value_changed := false;
 			END IF;
+
+			proposed_value := accepted_value;
+			proposed_value_id := accepted_value_id;
+			inform_learners := false;
+
 			EXIT;
 		END IF;
 
@@ -323,16 +330,18 @@ BEGIN
 
 			current_proposal_id := max_prepare_response.proposal_id + 1;
 			CONTINUE;
-		ELSIF max_prepare_response.value_proposer_id IS NOT NULL THEN
-			proposed_value := max_prepare_response.value;
-
-			IF max_prepare_response.value_proposer_id <> current_proposer_id THEN
+		ELSIF max_prepare_response.value_id IS NOT NULL THEN
+			-- A value was already accepted, I change my proposal to this value
+			IF max_prepare_response.value_id <> initial_value_id AND max_prepare_response.value <> initial_value THEN
 				-- I use a value from a different proposer
 				value_changed := true;
 			ELSE
-				-- I use my own value, which was previously accepted
+				-- I revert to my own value, which was previously accepted by someone else
 				value_changed := false;
 			END IF;
+
+			proposed_value := max_prepare_response.value;
+			proposed_value_id := max_prepare_response.value_id;
 		END IF;
 
 		-- Phase 2: accept
@@ -341,6 +350,7 @@ BEGIN
 							current_group_id,
 							current_round_id,
 							current_proposal_id,
+							proposed_value_id,
 							proposed_value);
 
 		-- Check whether majority responded
@@ -385,7 +395,8 @@ BEGIN
 							current_group_id,
 							current_round_id,
 							current_proposal_id,
-							result.accepted_value);
+							proposed_value_id,
+							proposed_value);
 	END IF;
 
 	DROP TABLE prepare_responses;
@@ -433,6 +444,7 @@ CREATE FUNCTION paxos_accept(
 							current_group_id text,
 							current_round_id bigint,
 							current_proposal_id bigint,
+							proposed_value_id text,
 							proposed_value text)
 RETURNS SETOF accept_response
 AS $BODY$
@@ -440,11 +452,12 @@ DECLARE
 	accept_query text;
 	host record;
 BEGIN
-	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s)',
+	accept_query := format('SELECT paxos_request_accept(%s,%s,%s,%s,%s,%s)',
 							quote_literal(current_proposer_id),
 							quote_literal(current_group_id),
 							current_round_id,
 							current_proposal_id,
+							quote_literal(proposed_value_id),
 							quote_literal(proposed_value));
 
 	PERFORM paxos_broadcast_query(accept_query);
@@ -465,6 +478,7 @@ CREATE FUNCTION paxos_inform_learners(
 							current_group_id text,
 							current_round_id bigint,
 							current_proposal_id bigint,
+							proposed_value_id text,
 							proposed_value text)
 RETURNS void
 AS $BODY$
@@ -473,11 +487,12 @@ DECLARE
 	host record;
 BEGIN
 	-- For now, only acceptors are learners to avoid re-connecting to failed nodes
-	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s,%s,%s)',
+	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s,%s,%s,%s)',
 							quote_literal(current_proposer_id),
 							quote_literal(current_group_id),
 							current_round_id,
 							current_proposal_id,
+							quote_literal(proposed_value_id),
 							quote_literal(proposed_value));
 
 	PERFORM paxos_broadcast_query(confirm_query);
@@ -561,7 +576,7 @@ BEGIN
 						  quote_literal(current_group_id));
 
 	IF accepted_only THEN
-		round_query := round_query || ' AND value_proposer_id IS NOT NULL';
+		round_query := round_query || ' AND value_id IS NOT NULL';
 	END IF;
 
 	-- Ask majority for highest round
