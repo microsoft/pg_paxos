@@ -4,8 +4,8 @@
 CREATE SCHEMA pgp_metadata
 
 	/*
-	 * The "group" table keeps track of which items from the log have been consumed
-	 * for a given group, identified by its name.
+	 * The "group" table keeps track of which items from the log have been
+	 * consumed/applied for a particular group.
 	 */
 	CREATE TABLE "group" (
 		group_id text not null,
@@ -14,8 +14,8 @@ CREATE SCHEMA pgp_metadata
 	)
 
 	/*
-	 * The "host" table stores which members are part of a given Paxos group for a given
-	 * round. A host should be included if the round lies between min_round_num
+	 * The "host" table stores which members are part of a Paxos group during a given
+	 * round. A host should be included if the current round lies between min_round_num
 	 * and max_round_num.
 	 */
 	CREATE TABLE "host" (
@@ -29,8 +29,7 @@ CREATE SCHEMA pgp_metadata
 	)
 
 	/*
-	 * The "round" table contains a the Multi-Paxos log for a given group.
-	 * for a given group, identified by its name.
+	 * The "round" table contains a the Multi-Paxos log for a Paxos group.
 	 *
 	 * group_id - the name of the group
 	 * round_num - the round number
@@ -87,8 +86,8 @@ CREATE TYPE prepare_response AS (
 /*
  * Response from acceptor to accept requests.
  *
- * accepted - false if a higher proposal number was received, true otherwise
- * proposal_num - the number of the higher proposal
+ * accepted - false if a higher proposal was received, true otherwise
+ * proposal_num - if a higher proposal was received, its number
  */
 CREATE TYPE accept_response AS (
 	accepted boolean,
@@ -108,7 +107,8 @@ CREATE TYPE paxos_result AS (
 
 
 /*
- * Replicate the table identified by new_table_oid within Paxos group current_group_id.
+ * paxos_replicate_table replicates the table identified by new_table_oid within
+ * the Paxos group identified by current_group_id.
  */
 CREATE FUNCTION paxos_replicate_table(
 								current_group_id text,
