@@ -259,9 +259,8 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 /*
- * paxos proposes value proposed_value for round current_round_num in group named
- * current_group_id through the Paxos algorithm. The value of current_proposer_id
- * uniquely identifies the proposal for the duration of the function call.
+ * Propose a value in a Paxos group for the given round. The current_proposer_id
+ * has to be unique within the round (it can be reused in other rounds).
  */
 CREATE FUNCTION paxos(
 							current_proposer_id text,
