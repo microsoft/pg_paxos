@@ -371,8 +371,10 @@ BEGIN
 		IF NOT max_prepare_response.promised THEN
 			/* Another proposal with a higher proposal number exists */
 
-			IF max_prepare_response.proposal_num = current_proposal_num AND current_proposal_num > 0 THEN
-				RAISE NOTICE 'competing with %, retrying after random back-off', max_prepare_response.proposer_id;
+			IF max_prepare_response.proposal_num = current_proposal_num
+			AND current_proposal_num > 0 THEN
+				RAISE NOTICE 'competing with %, retrying after random back-off',
+							 max_prepare_response.proposer_id;
 				PERFORM pg_sleep(trunc(random() * (EXTRACT(EPOCH FROM clock_timestamp())-start_time)));
 			END IF;
 
@@ -381,7 +383,8 @@ BEGIN
 		ELSIF max_prepare_response.value_id IS NOT NULL THEN
 			/* A value was already accepted, I change my proposal to this value */
 
-			IF max_prepare_response.value_id <> initial_value_id AND max_prepare_response.value <> initial_value THEN
+			IF max_prepare_response.value_id <> initial_value_id
+			AND max_prepare_response.value <> initial_value THEN
 				/* I will use a value from a different proposer */
 				value_changed := true;
 			ELSE
@@ -419,7 +422,9 @@ BEGIN
 		IF num_accepted < majority_size THEN
 			RAISE NOTICE 'could not get accepted by majority, retrying after 1 sec';
 
-			SELECT * INTO max_accept_response FROM accept_responses ORDER BY proposal_num DESC LIMIT 1;
+			SELECT * INTO max_accept_response
+			FROM accept_responses
+			ORDER BY proposal_num DESC LIMIT 1;
 
 			IF NOT max_accept_response.proposal_num > current_proposal_num THEN
 				/* If a previous proposal has a higher proposal number, use that + 1 */
@@ -482,7 +487,8 @@ BEGIN
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
 		RETURN QUERY
-		SELECT (resp).* FROM dblink_get_result(host.connection_name, false) AS (resp prepare_response);
+		SELECT (resp).* FROM dblink_get_result(host.connection_name, false)
+							 AS (resp prepare_response);
 	END LOOP;
 
 	PERFORM paxos_clear_connections();
@@ -518,7 +524,8 @@ BEGIN
 
 	FOR host IN SELECT * FROM hosts WHERE connected LOOP
 		RETURN QUERY
-		SELECT (resp).* FROM dblink_get_result(host.connection_name) AS (resp accept_response);
+		SELECT (resp).* FROM dblink_get_result(host.connection_name)
+							 AS (resp accept_response);
 	END LOOP;
 
 	PERFORM paxos_clear_connections();
@@ -915,14 +922,16 @@ DECLARE
 	num_hosts int;
 BEGIN
 
-	IF NOT EXISTS (SELECT relname FROM pg_class WHERE relnamespace = pg_my_temp_schema() AND relname = 'hosts') THEN
+	IF NOT EXISTS (
+		SELECT relname
+		FROM pg_class
+		WHERE relnamespace = pg_my_temp_schema() AND relname = 'hosts') THEN
 
 		CREATE TEMPORARY TABLE IF NOT EXISTS hosts (
 			connection_name text,
 			node_name text,
 			node_port int,
-			connected boolean,
-			participating boolean
+			connected boolean
 		);
 
 	END IF;
@@ -930,7 +939,9 @@ BEGIN
 	TRUNCATE hosts;
 
 	INSERT INTO hosts
-	SELECT format('%s:%s', node_name, node_port) AS connection_name, node_name, node_port, false AS connected, true AS participating
+	SELECT format('%s:%s', node_name, node_port) AS connection_name,
+		   node_name, node_port,
+		   false AS connected
 	FROM pgp_metadata.host
 	WHERE group_id = current_group_id
 	  AND min_round_num <= current_round_num
@@ -963,7 +974,8 @@ BEGIN
 	FOR host IN
 	SELECT h.connection_name, h.node_name, h.node_port, c.connected
 	FROM hosts h LEFT OUTER JOIN
-		 (SELECT unnest AS connected FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
+		 (SELECT unnest AS connected
+		  FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
 
 		IF host.connected IS NOT NULL THEN
 			IF dblink_error_message(host.connection_name) = 'OK' THEN
@@ -988,11 +1000,14 @@ BEGIN
 	FOR host IN
 	SELECT h.connection_name, h.node_name, h.node_port, c.connected
 	FROM hosts h LEFT OUTER JOIN
-		 (SELECT unnest AS connected FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
+		 (SELECT unnest AS connected
+		  FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
 
 		IF host.connected IS NULL THEN
 			/* Open new connection */
-			connection_string := format('hostaddr=%s port=%s connect_timeout=10', host.node_name, host.node_port);
+			connection_string := format('hostaddr=%s port=%s connect_timeout=10',
+										host.node_name,
+										host.node_port);
 
 			BEGIN
 				PERFORM dblink_connect(host.connection_name, connection_string);
