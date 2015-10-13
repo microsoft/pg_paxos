@@ -107,25 +107,6 @@ CREATE TYPE paxos_result AS (
 
 
 /*
- * paxos_replicate_table replicates the table identified by new_table_oid within
- * the Paxos group identified by current_group_id.
- */
-CREATE FUNCTION paxos_replicate_table(
-								current_group_id text,
-								new_table_oid regclass)
-RETURNS void
-AS $BODY$
-BEGIN
-	INSERT INTO pgp_metadata.replicated_tables (
-			table_name,
-			group_id)
-	VALUES (new_table_oid,
-			current_group_id);
-END;
-$BODY$ LANGUAGE plpgsql;
-
-
-/*
  * paxos_request_prepare is a remote procedure that request participation of an
  * acceptor in a proposal. Effectively it grabs a preemptable lock.
  */
@@ -1082,3 +1063,24 @@ BEGIN
 	END LOOP;
 END;
 $BODY$ LANGUAGE 'plpgsql';
+
+
+/*
+ * paxos_replicate_table replicates the table identified by new_table_oid within
+ * the Paxos group identified by current_group_id.
+ */
+CREATE FUNCTION paxos_replicate_table(
+								current_group_id text,
+								new_table_oid regclass)
+RETURNS void
+AS $BODY$
+BEGIN
+	INSERT INTO pgp_metadata.replicated_tables (
+			table_name,
+			group_id)
+	VALUES (new_table_oid,
+			current_group_id);
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
