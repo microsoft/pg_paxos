@@ -549,7 +549,6 @@ DECLARE
 	confirm_query text;
 	host record;
 BEGIN
-	-- For now, only acceptors are learners to avoid re-connecting to failed nodes
 	confirm_query := format('SELECT paxos_confirm_consensus(%s,%s,%s,%s,%s,%s)',
 							quote_literal(current_proposer_id),
 							quote_literal(current_group_id),
