@@ -388,6 +388,14 @@ PrepareConsistentRead(char *groupId)
 	if (ReadConsistencyModel == STRONG_CONSISTENCY)
 	{
 		maxRoundId = PaxosMaxAcceptedRound(groupId);
+
+		/*
+		 * Open issue: if there have been membership changes between
+		 * maxAppliedRoundId and maxRoundId, then the maxRoundId may
+		 * not reflect the most recently accepted round in the new
+		 * membership view. Effectively, it should be re-established
+		 * after every membership change.
+		 */
 	}
 	else /* ReadyConsistencyModel == OPTIMISTIC_CONSISTENCY */
 	{
