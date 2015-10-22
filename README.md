@@ -29,7 +29,7 @@ An example of setting up a replicated table on 3 servers that run on the same ho
     INSERT INTO pgp_metadata.host VALUES ('mokka', '127.0.0.1', 5432, 0);
     INSERT INTO pgp_metadata.host VALUES ('mokka', '127.0.0.1', 9700, 0);
     INSERT INTO pgp_metadata.host VALUES ('mokka', '127.0.0.1', 9701, 0);
-    INSERT INTO pgp_metadata.replicated_tables VALUES ('public','coordinates','mokka');
+    INSERT INTO pgp_metadata.replicated_tables VALUES ('coordinates','mokka');
     
 An example of how pg_paxos replicates the metadata:
 
