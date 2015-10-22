@@ -36,9 +36,10 @@ CREATE SCHEMA pgp_metadata
 	 * min_proposal_num - do not accept proposals with a lower proposal number than this
 	 * proposer_id - the node that made the proposal (to ensure ordering)
 	 * value_id - an identifier for the value that is unique for the round
-	 * value - the value proposed through Paxos
+	 * value - a value that was accepted for this round
+	 * accepted_proposal_num - the proposal number that was accepted
 	 * consensus - whether consensus was confirmed for the value
-	 * error - error messages that was gneerated when applying the value
+	 * error - error messages that was generated when applying the value
 	 */
 	CREATE TABLE "round" (
 		group_id text not null,
@@ -47,6 +48,7 @@ CREATE SCHEMA pgp_metadata
 		proposer_id text not null,
 		value_id text,
 		value text,
+		accepted_proposal_num bigint,
 		consensus bool not null default false,
 		error text,
 		PRIMARY KEY (group_id, round_num),
@@ -74,13 +76,15 @@ CREATE SCHEMA pgp_metadata
  * proposal_num - if a higher proposal was received, its number
  * value_id - if a proposal was previously accepted, its value identifier
  * value - if a proposal was previously accepted, its value
+ * accepted_proposal_num - if a proposal was previously accepted, its number
  */
 CREATE TYPE prepare_response AS (
 	promised boolean,
 	proposer_id text,
 	proposal_num bigint,
 	value_id text,
-	value text
+	value text,
+	accepted_proposal_num bigint
 );
 
 /*
@@ -146,7 +150,7 @@ BEGIN
 				current_proposal_num,
 				current_proposer_id);
 
-		SELECT true, current_proposer_id, current_proposal_num, NULL, NULL
+		SELECT true, current_proposer_id, current_proposal_num, NULL, NULL, NULL
 		INTO response;
 
 	ELSIF current_proposal_num > round.min_proposal_num OR
@@ -160,13 +164,15 @@ BEGIN
 			proposer_id = current_proposer_id
 		WHERE group_id = current_group_id AND round_num = current_round_num;
 
-		SELECT true, current_proposer_id, current_proposal_num, round.value_id, round.value
+		SELECT true, current_proposer_id, current_proposal_num,
+			   round.value_id, round.value, round.accepted_proposal_num
 		INTO response;
 
 	ELSE
 		/*  I have seen a prepare request with a higher proposal number (or same) */
 
-		SELECT false, round.proposer_id, round.min_proposal_num, round.value_id, round.value
+		SELECT false, round.proposer_id, round.min_proposal_num,
+			   round.value_id, round.value, round.accepted_proposal_num
 		INTO response;
 	END IF;
 
@@ -213,8 +219,9 @@ BEGIN
 		/* I have indeed promised to participate in this proposal and accept it */
 
 		UPDATE pgp_metadata.round
-		SET "value" = proposed_value,
-			"value_id" = proposed_value_id
+		SET value_id = proposed_value_id,
+			value = proposed_value,
+			accepted_proposal_num = current_proposal_num
 		WHERE group_id = current_group_id AND round_num = current_round_num;
 
 		SELECT true, current_proposal_num INTO response;
@@ -237,7 +244,7 @@ CREATE FUNCTION paxos_confirm_consensus(
 							current_proposer_id text,
 							current_group_id text,
 							current_round_num bigint,
-							accepted_proposal_num bigint,
+							current_proposal_num bigint,
 							accepted_value_id text,
 							accepted_value text)
 RETURNS boolean
@@ -248,9 +255,10 @@ BEGIN
 	UPDATE pgp_metadata.round
 	SET consensus = true,
 		proposer_id = current_proposer_id,
-		min_proposal_num = accepted_proposal_num,
+		min_proposal_num = current_proposal_num,
+		value = accepted_value,
 		value_id = accepted_value_id,
-		value = accepted_value
+		accepted_proposal_num = current_proposal_num
 	WHERE group_id = current_group_id AND round_num = current_round_num;
 
 	RETURN true;
@@ -273,11 +281,11 @@ DECLARE
 	num_hosts int;
 	num_open_connections int;
 	majority_size int;
-	current_proposal_num int := 0;
+	current_proposal_num bigint := 0;
 	num_prepare_responses int;
+	num_promises int;
 	max_prepare_response prepare_response;
 	num_accept_responses int;
-	max_accept_response accept_response;
 	num_accepted int;
 	initial_value text := proposed_value;
 	initial_value_id text := current_proposer_id;
@@ -298,9 +306,10 @@ BEGIN
 	CREATE TEMPORARY TABLE IF NOT EXISTS prepare_responses (
 		promised boolean,
 		proposer_id text,
-		proposal_num bigint,
+		min_proposal_num bigint,
 		value_id text,
-		value text
+		value text,
+		accepted_proposal_num bigint
 	);
 
 	CREATE TEMPORARY TABLE IF NOT EXISTS accept_responses (
@@ -331,11 +340,15 @@ BEGIN
 		SELECT count(*) INTO num_prepare_responses FROM prepare_responses;
 
 		IF num_prepare_responses < majority_size THEN
-			RAISE NOTICE 'could only get % out of % prepare responses, retrying after 1 sec',
+			RAISE INFO 'could only get % out of % prepare responses, retrying after 1 sec',
 						 num_prepare_responses, majority_size;
-
 			PERFORM pg_sleep(1);
-			current_proposal_num := current_proposal_num + 1;
+
+			/* Make sure current_proposal_num is higher than any other known proposal */
+			SELECT greatest(max(min_proposal_num), current_proposal_num) + 1
+			INTO current_proposal_num
+			FROM prepare_responses;
+
 			CONTINUE;
 		END IF;
 
@@ -362,26 +375,38 @@ BEGIN
 			EXIT;
 		END IF;
 
-		/* Find highest existing proposal */
-		SELECT * INTO max_prepare_response
-		FROM prepare_responses
-		ORDER BY proposal_num DESC, proposer_id DESC LIMIT 1;
+		/* Check whether majority promised to participate */
+		SELECT count(*) INTO num_promises FROM prepare_responses WHERE promised;
 
-		IF NOT max_prepare_response.promised THEN
-			/* Another proposal with a higher proposal number exists */
+		IF num_promises < majority_size THEN
 
-			IF max_prepare_response.proposal_num = current_proposal_num
-			AND current_proposal_num > 0 THEN
-				RAISE NOTICE 'competing with %, retrying after random back-off',
+			/* Check whether I'm competing with someone */
+			SELECT * INTO max_prepare_response
+			FROM prepare_responses
+			ORDER BY proposal_num DESC, proposer_id DESC LIMIT 1;
+
+			IF max_prepare_response.min_proposal_num = current_proposal_num THEN
+				RAISE INFO 'competing with %, retrying after random back-off',
 							 max_prepare_response.proposer_id;
 				PERFORM pg_sleep(trunc(random() * (EXTRACT(EPOCH FROM clock_timestamp())-start_time)));
 			END IF;
 
-			current_proposal_num := max_prepare_response.proposal_num + 1;
-			CONTINUE;
-		ELSIF max_prepare_response.value_id IS NOT NULL THEN
-			/* A value was already accepted, I change my proposal to this value */
+			/* Make sure current_proposal_num is higher than any other known proposal */
+			SELECT greatest(max(min_proposal_num), current_proposal_num) + 1
+			INTO current_proposal_num
+			FROM prepare_responses;
 
+			CONTINUE;
+		END IF;
+
+		/* Find highest accepted proposal */
+		SELECT * INTO max_prepare_response
+		FROM prepare_responses
+		WHERE value_id IS NOT NULL
+		ORDER BY accepted_proposal_num DESC, value_id DESC LIMIT 1;
+
+		/* If value was already accepted, change my proposal to the most recent value */
+		IF FOUND THEN
 			IF max_prepare_response.value_id <> initial_value_id
 			OR max_prepare_response.value <> initial_value THEN
 				/* I will use a value from a different proposer */
@@ -395,7 +420,7 @@ BEGIN
 			proposed_value_id := max_prepare_response.value_id;
 		END IF;
 
-		/* Phase 1 of Paxos: accept */
+		/* Phase 2 of Paxos: accept */
 		INSERT INTO accept_responses SELECT * FROM paxos_accept(
 							current_proposer_id,
 							current_group_id,
@@ -408,10 +433,14 @@ BEGIN
 		SELECT count(*) INTO num_accept_responses FROM accept_responses;
 
 		IF num_accept_responses < majority_size THEN
-			RAISE NOTICE 'could not get accept responses from majority, retrying after 1 sec';
-
+			RAISE INFO 'could not get accept responses from majority, retrying after 1 sec';
 			PERFORM pg_sleep(1);
-			current_proposal_num := current_proposal_num + 1;
+
+			/* Make sure current_proposal_num is higher than any other known proposal */
+			SELECT greatest(max(proposal_num), current_proposal_num) + 1
+			INTO current_proposal_num
+			FROM accept_responses;
+
 			CONTINUE;
 		END IF;
 
@@ -419,18 +448,13 @@ BEGIN
 		SELECT count(*) INTO num_accepted FROM accept_responses WHERE accepted;
 
 		IF num_accepted < majority_size THEN
-			RAISE NOTICE 'could not get accepted by majority, retrying after 1 sec';
+			RAISE INFO 'could not get accepted by majority, retrying after 1 sec';
+			PERFORM pg_sleep(1);
 
-			SELECT * INTO max_accept_response
-			FROM accept_responses
-			ORDER BY proposal_num DESC LIMIT 1;
-
-			IF NOT max_accept_response.proposal_num > current_proposal_num THEN
-				/* If a previous proposal has a higher proposal number, use that + 1 */
-				current_proposal_num := max_accept_response.proposal_num + 1;
-			ELSE
-				current_proposal_num := current_proposal_num + 1;
-			END IF;
+			/* Make sure current_proposal_num is higher than any other known proposal */
+			SELECT greatest(max(proposal_num), current_proposal_num) + 1
+			INTO current_proposal_num
+			FROM accept_responses;
 
 			CONTINUE;
 		END IF;
@@ -716,7 +740,7 @@ BEGIN
 						'') INTO query, noop_written;
 		END IF;
 
-		RAISE NOTICE 'Executing: %', query;
+		RAISE INFO 'Executing: %', query;
 
 		BEGIN
 			EXECUTE query;
@@ -982,7 +1006,7 @@ BEGIN
 				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
 			ELSE
 				/* Close connections that have errored out, will not be used next round */
-				RAISE NOTICE 'connection error: %', dblink_error_message(host.connection_name);
+				RAISE INFO 'connection error: %', dblink_error_message(host.connection_name);
 				PERFORM dblink_disconnect(host.connection_name);
 				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
 			END IF;
@@ -1012,7 +1036,7 @@ BEGIN
 				num_open_connections := num_open_connections + 1;
 				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
 			EXCEPTION WHEN OTHERS THEN
-				RAISE NOTICE 'failed to connect to %:%', host.node_name, host.node_port;
+				RAISE INFO 'failed to connect to %:%', host.node_name, host.node_port;
 				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
 			END;
 		END IF;
@@ -1095,5 +1119,3 @@ BEGIN
 			current_group_id);
 END;
 $BODY$ LANGUAGE plpgsql;
-
-
