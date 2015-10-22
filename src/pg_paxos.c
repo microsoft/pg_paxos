@@ -82,7 +82,7 @@ static const struct config_enum_entry consistency_model_options[] = {
 /* whether writes go through Paxos */
 static bool PaxosEnabled = true;
 
-/* whether writes go through Paxos */
+/* unique node ID to use in Paxos */
 char *PaxosNodeId = NULL;
 
 /* consistency model for reads */
