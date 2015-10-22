@@ -341,7 +341,7 @@ BEGIN
 
 		IF num_prepare_responses < majority_size THEN
 			RAISE INFO 'could only get % out of % prepare responses, retrying after 1 sec',
-						 num_prepare_responses, majority_size;
+					   num_prepare_responses, majority_size;
 			PERFORM pg_sleep(1);
 
 			/* Make sure current_proposal_num is higher than any other known proposal */
@@ -387,7 +387,7 @@ BEGIN
 
 			IF max_prepare_response.min_proposal_num = current_proposal_num THEN
 				RAISE INFO 'competing with %, retrying after random back-off',
-							 max_prepare_response.proposer_id;
+						   max_prepare_response.proposer_id;
 				PERFORM pg_sleep(trunc(random() * (EXTRACT(EPOCH FROM clock_timestamp())-start_time)));
 			END IF;
 
