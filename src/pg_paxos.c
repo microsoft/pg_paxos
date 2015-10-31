@@ -382,32 +382,39 @@ static void
 PrepareConsistentRead(char *groupId)
 {
 	int64 maxRoundId = -1;
+	int64 membershipVersion = PaxosMembershipVersion(groupId);
 	int64 maxAppliedRoundId = PaxosMaxAppliedRound(groupId);
 	char *proposerId = GenerateProposerId();
 
 	if (ReadConsistencyModel == STRONG_CONSISTENCY)
 	{
 		maxRoundId = PaxosMaxAcceptedRound(groupId);
-
-		/*
-		 * Open issue: if there have been membership changes between
-		 * maxAppliedRoundId and maxRoundId, then the maxRoundId may
-		 * not reflect the most recently accepted round in the new
-		 * membership view. Effectively, it should be re-established
-		 * after every membership change.
-		 */
 	}
 	else /* ReadyConsistencyModel == OPTIMISTIC_CONSISTENCY */
 	{
 		maxRoundId = PaxosMaxLocalConsensusRound(groupId);
 	}
 
-	if (maxAppliedRoundId < maxRoundId)
+	while (maxAppliedRoundId < maxRoundId)
 	{
 		PaxosEnabled = false;
 		PaxosApplyLog(groupId, proposerId, maxRoundId);
 		PaxosEnabled = true;
 		CommandCounterIncrement();
+
+		if (ReadConsistencyModel == STRONG_CONSISTENCY)
+		{
+			int64 newMembershipVersion = PaxosMembershipVersion(groupId);
+			if(newMembershipVersion > membershipVersion)
+			{
+				/*
+				 * If membership changed a lot, then the original maxRoundId may
+				 * not have been accurate. Refresh it to make sure.
+				 */
+				maxRoundId = PaxosMaxAcceptedRound(groupId);
+				membershipVersion = newMembershipVersion;
+			}
+		}
 	}
 }
 

@@ -20,5 +20,6 @@ extern int64 PaxosMaxLocalConsensusRound(char *groupId);
 extern int64 PaxosMaxAcceptedRound(char *groupId);
 extern int64 PaxosApplyLog(char *groupId, char *proposerId, int64 maxRoundId);
 extern void PaxosSetApplied(char *groupId, int64 appliedRoundId);
+extern int64 PaxosMembershipVersion(char *groupId);
 
 #endif /* PG_PAXOS_API_H */

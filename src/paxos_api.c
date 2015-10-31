@@ -201,3 +201,32 @@ PaxosSetApplied(char *groupId, int64 appliedRoundId)
 
 	SPI_finish();
 }
+
+
+int64
+PaxosMembershipVersion(char *groupId)
+{
+	int membershipVersion = -1;
+	Datum membershipVersionDatum = 0;
+	Oid argTypes[] = {
+		TEXTOID
+	};
+	Datum argValues[] = {
+		CStringGetTextDatum(groupId)
+	};
+	bool isNull = false;
+
+	SPI_connect();
+
+	SPI_execute_with_args("SELECT max(xmin::text::bigint) FROM pgp_metadata.host "
+						  "WHERE group_id = $1",
+						  1, argTypes, argValues, NULL, false, 1);
+
+	membershipVersionDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+										   1, &isNull);
+	membershipVersion = DatumGetInt64(membershipVersionDatum);
+
+	SPI_finish();
+
+	return membershipVersion;
+}
