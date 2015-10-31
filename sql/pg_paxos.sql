@@ -340,8 +340,8 @@ BEGIN
 		SELECT count(*) INTO num_prepare_responses FROM prepare_responses;
 
 		IF num_prepare_responses < majority_size THEN
-			RAISE INFO 'could only get % out of % prepare responses, retrying after 1 sec',
-					   num_prepare_responses, majority_size;
+			RAISE WARNING 'could only get % out of % prepare responses, retrying after 1 sec',
+						  num_prepare_responses, majority_size;
 			PERFORM pg_sleep(1);
 
 			/* Make sure current_proposal_num is higher than any other known proposal */
@@ -386,8 +386,8 @@ BEGIN
 			ORDER BY proposal_num DESC, proposer_id DESC LIMIT 1;
 
 			IF max_prepare_response.min_proposal_num = current_proposal_num THEN
-				RAISE INFO 'competing with %, retrying after random back-off',
-						   max_prepare_response.proposer_id;
+				RAISE DEBUG 'competing with %, retrying after random back-off',
+							max_prepare_response.proposer_id;
 				PERFORM pg_sleep(trunc(random() * (EXTRACT(EPOCH FROM clock_timestamp())-start_time)));
 			END IF;
 
@@ -433,7 +433,7 @@ BEGIN
 		SELECT count(*) INTO num_accept_responses FROM accept_responses;
 
 		IF num_accept_responses < majority_size THEN
-			RAISE INFO 'could not get accept responses from majority, retrying after 1 sec';
+			RAISE WARNING 'could not get accept responses from majority, retrying after 1 sec';
 			PERFORM pg_sleep(1);
 
 			/* Make sure current_proposal_num is higher than any other known proposal */
@@ -448,7 +448,7 @@ BEGIN
 		SELECT count(*) INTO num_accepted FROM accept_responses WHERE accepted;
 
 		IF num_accepted < majority_size THEN
-			RAISE INFO 'could not get accepted by majority, retrying after 1 sec';
+			RAISE DEBUG 'could not get accepted by majority, retrying after 1 sec';
 			PERFORM pg_sleep(1);
 
 			/* Make sure current_proposal_num is higher than any other known proposal */
@@ -711,6 +711,8 @@ AS $BODY$
 DECLARE
 	last_applied_round_num bigint;
 	current_round_num bigint;
+	current_membership_view bigint;
+	post_membership_view bigint;
 	query text;
 	noop_written boolean;
 BEGIN
@@ -740,7 +742,7 @@ BEGIN
 						'') INTO query, noop_written;
 		END IF;
 
-		RAISE INFO 'Executing: %', query;
+		RAISE DEBUG 'Executing: %', query;
 
 		BEGIN
 			EXECUTE query;
@@ -903,28 +905,18 @@ AS $BODY$
 DECLARE
 	max_local_round bigint;
 	num_hosts int;
+	majority_size int;
 	num_open_connections int;
 	round_query text;
 	host record;
 BEGIN
-	/*
-	 * We call this function before we know the current round number so we have to make
-	 * a guess based on local information to get the current set of hosts. It is not
-	 * critical that we get the set of hosts right, since it is not critical that we
-	 * get the round number right, but getting it wrong causes a lot of redundant work.
-	 */
-	SELECT max(round_num) INTO max_local_round
-	FROM pgp_metadata.round
-	WHERE group_id = current_group_id;
+	/* Always use the most recent membership view (maximum bigint) */
+	SELECT paxos_find_hosts(current_group_id, 9223372036854775807) INTO num_hosts;
 
-	IF max_local_round IS NULL THEN
-		max_local_round = 0;
-	END IF;
-
-	SELECT paxos_find_hosts(current_group_id, max_local_round) INTO num_hosts;
+	majority_size = num_hosts / 2 + 1;
 
 	/* Try to open connections to a majority of hosts */
-	SELECT paxos_open_connections(num_hosts) INTO num_open_connections;
+	SELECT paxos_open_connections(majority_size) INTO num_open_connections;
 
 	return num_hosts;
 END;
@@ -1006,7 +998,7 @@ BEGIN
 				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
 			ELSE
 				/* Close connections that have errored out, will not be used next round */
-				RAISE INFO 'connection error: %', dblink_error_message(host.connection_name);
+				RAISE WARNING 'connection error: %', dblink_error_message(host.connection_name);
 				PERFORM dblink_disconnect(host.connection_name);
 				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
 			END IF;
@@ -1036,7 +1028,7 @@ BEGIN
 				num_open_connections := num_open_connections + 1;
 				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
 			EXCEPTION WHEN OTHERS THEN
-				RAISE INFO 'failed to connect to %:%', host.node_name, host.node_port;
+				RAISE WARNING 'failed to connect to %:%', host.node_name, host.node_port;
 				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
 			END;
 		END IF;
