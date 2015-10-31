@@ -608,22 +608,14 @@ DECLARE
 BEGIN
 
 	/*
-	 * Start with a round ID that is higher than the highest round ID in
-	 * a majority of nodes meaning higher than any round ID on which
-	 * consensus was reached. Since I'll use the same nodes as acceptors,
-	 * I have a good chance of getting my proposal accepted.
-     */
-	SELECT paxos_max_group_round(current_group_id) INTO current_round_num;
-
-	/*
-	 * Another node could be using the same or higher round ID, but
-	 * if that node reaches consensus on its value for that round we
-	 * will retry paxos with round ID + 1, until we succeed.
-
-	 * An optimization would be to resume from the competing round ID + 1,
-	 * which may be relevant when another node is performing a large number
-	 * of writes.
+	 * We optimistically assume we that we know about all rounds and start from the
+	 * highest. Another node could be using the same or higher round ID, but if that
+	 * node reaches consensus on its value for that round we will retry paxos with
+	 * round ID + 1, until we succeed.
 	 */
+	SELECT Coalesce(max(round_num), -1) INTO current_round_num
+	FROM pgp_metadata.round WHERE group_id = current_group_id;
+
 	WHILE NOT value_written LOOP
 		current_round_num := current_round_num + 1;
 
@@ -779,7 +771,8 @@ DECLARE
 	value_written bool := false;
 	query text;
 BEGIN
-	SELECT paxos_max_group_round(current_group_id) INTO current_round_num;
+	SELECT Coalesce(max(round_num), -1) INTO current_round_num
+	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
 	WHILE NOT value_written LOOP
 		PERFORM paxos_apply_log(
@@ -818,7 +811,8 @@ DECLARE
 	accepted_value text;
 	value_written boolean := false;
 BEGIN
-	SELECT paxos_max_group_round(current_group_id) INTO current_round_num;
+	SELECT Coalesce(max(round_num), -1) INTO current_round_num
+	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
 	WHILE NOT value_written LOOP
 		PERFORM paxos_apply_log(
@@ -862,7 +856,8 @@ DECLARE
 	accepted_value text;
 	value_written boolean := false;
 BEGIN
-	SELECT paxos_max_group_round(current_group_id) INTO current_round_num;
+	SELECT Coalesce(max(round_num), -1) INTO current_round_num
+	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
 	WHILE NOT value_written LOOP
 		PERFORM paxos_apply_log(
