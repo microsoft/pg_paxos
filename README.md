@@ -129,7 +129,7 @@ To add a new host to a Paxos group, run the paxos_add_host function on one of th
 To remove a host from the Paxos group, run the paxos_remove_host command on one of the existing members. The function works in a similar way to paxos_add_host.
 
     SELECT paxos_remove_host(
-                    current_proposer_id := 'node-a/1249',
+                    current_proposer_id := 'node-a/1250',
                     current_group_id := 'ha_postgres',
                     hostname := '10.35.209.23',
                     port := 5432);
@@ -137,14 +137,14 @@ To remove a host from the Paxos group, run the paxos_remove_host command on one 
 The paxos_apply function executes all SQL queries in the log for group ha_postgres that have not yet been executed up to and including round number 3:
 
     SELECT * FROM paxos_apply(
-                    current_proposer_id := 'node-a/1249',
+                    current_proposer_id := 'node-a/1251',
                     current_group_id := 'ha_postgres',
                     max_round_num := 3);
 
 The paxos_apply_and_append function appends a SQL query to the log after ensuring that all queries that will preceed it in the log have been executed:
 
     SELECT * FROM paxos_apply_and_append(
-                    current_proposer_id := 'node-a/1249',
+                    current_proposer_id := 'node-a/1252',
                     current_group_id := 'ha_postgres',
                     proposed_value := 'INSERT INTO coordinates VALUES (3,3)');
     
