@@ -136,7 +136,7 @@ To remove a host from the Paxos group, run the paxos_remove_host command on one 
 
 The paxos_apply function executes all SQL queries in the log for group ha_postgres that have not yet been executed up to and including round number 3:
 
-    SELECT * FROM paxos_apply(
+    SELECT * FROM paxos_apply_log(
                     current_proposer_id := 'node-a/1251',
                     current_group_id := 'ha_postgres',
                     max_round_num := 3);
