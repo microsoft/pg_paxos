@@ -47,7 +47,7 @@ The latest value in the Paxos log can be retrieved using:
 
 pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind. 
 
-An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After setting up the metadata, all writes to the coordinates table are replicated to the other nodes.
+An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After adding the metadata on *all nodes*, all writes to the coordinates table are replicated to the other nodes.
 
     CREATE TABLE coordinates (
         x int,
@@ -116,7 +116,7 @@ An example of how pg_paxos replicates the metadata:
 
 ## Advanced Table Replication UDFs
 
-When using pg_paxos for table replication, it is assumed that the items in the log are always valid SQL queries. This property can also be used to perform membership changes.
+When using pg_paxos for table replication, items in the log are all SQL queries. This property can also be used to perform membership changes.
 
 To add a new host to a Paxos group, run the paxos_add_host function on one of the existing members. The paxos_add_host function logs a query that updates the membership table on all nodes and returns the round number in which the query was logged. Any call to paxos for a higher round will include the host in the group.
 
