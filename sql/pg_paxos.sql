@@ -638,7 +638,7 @@ $BODY$ LANGUAGE 'plpgsql';
  */
 CREATE FUNCTION paxos_max_group_round(
 							current_group_id text,
-							accepted_only boolean DEFAULT false)
+							accepted_only boolean DEFAULT true)
 RETURNS bigint
 AS $BODY$
 DECLARE
