@@ -1,6 +1,6 @@
 # pg_paxos
 
-This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and basic table replication through Multi-Paxos. It is in a very early stage, consider it primarily for educational purposes. 
+This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and basic table replication through Multi-Paxos. It is in an early stage, consider it primarily for educational purposes. 
 
 pg_paxos can be used to replicate a table across multiple PostgreSQL servers. Every INSERT/UPDATE/DELETE on a replicated table is logged through Paxos. When a query is performed on the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, providing strong consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (e.g. 2 out of 5). 
 
