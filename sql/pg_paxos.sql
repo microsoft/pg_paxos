@@ -596,7 +596,7 @@ $BODY$ LANGUAGE 'plpgsql';
  * current_group_id.
  */
 CREATE FUNCTION paxos_append(
-							proposer_id text,
+							current_proposer_id text,
 							current_group_id text,
 							proposed_value text)
 RETURNS bigint
@@ -620,7 +620,7 @@ BEGIN
 		current_round_num := current_round_num + 1;
 
 		SELECT paxos(
-						proposer_id,
+						current_proposer_id,
 						current_group_id,
 						current_round_num,
 						proposed_value) INTO accepted_value, value_written;
