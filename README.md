@@ -19,7 +19,7 @@ pg_paxos requires the dblink extension to be installed. After installing both ex
     CREATE EXTENSION dblink;
     CREATE EXTENSION pg_paxos;
     
-To do table replication, pg_paxos uses PostgreSQL's executor hooks. To activate executor hooks, add pg_paxos to the shared_preload_libraries in postgresql.conf and restart postgres. It is also advisable to specify a unique node_id, which is needed to guarantee consistency in certain scenarios.
+To do table replication, pg_paxos uses PostgreSQL's executor hooks to log SQL queries performed by the user in the Paxos log. To activate executor hooks, add pg_paxos to the shared_preload_libraries in postgresql.conf and restart postgres. It is also advisable to specify a unique node_id, which is needed to guarantee consistency in certain scenarios.
 
     # in postgresql.conf
     shared_preload_libraries = 'pg_paxos'
@@ -34,7 +34,7 @@ The following query appends value 'primary = ip-10-11-204-31.ec2.internal' to th
                     current_group_id := 'ha_postgres',
                     proposed_value := 'primary = ip-10-11-204-31.ec2.internal');
 
-current_proposer_id is a value that should be unique across the cluster for the given group and round. This is mainly used to determine which proposal was accepted when two proposers use the same value.
+current_proposer_id is a value that should be unique across the cluster for the given group and round. This is mainly used to determine which proposal was accepted when two proposers propose the same value.
 
 The latest value in the Paxos log can be retrieved using:
 
@@ -42,8 +42,10 @@ The latest value in the Paxos log can be retrieved using:
                     current_proposer_id := 'node-a/1248',
                     current_group_id := 'ha_postgres',
                     current_round_num := paxos_max_group_round('ha_postgres'));
-                    
+
 ## Using Table Replication
+
+pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind. 
 
 An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After setting up the metadata, all writes to the coordinates table are replicated to the other nodes.
 
@@ -110,6 +112,41 @@ An example of how pg_paxos replicates the metadata:
      10 | 1
      20 | 2
     (2 rows)
+
+
+## Advanced Table Replication UDFs
+
+When using pg_paxos for table replication, it is assumed that the items in the log are always valid SQL queries. This property can also be used to perform membership changes.
+
+To add a new host to a Paxos group, run the paxos_add_host function on one of the existing members. The paxos_add_host function logs a query that updates the membership table on all nodes and returns the round number in which the query was logged. Any call to paxos for a higher round will include the host in the group.
+
+    SELECT paxos_add_host(
+                    current_proposer_id := 'node-a/1249',
+                    current_group_id := 'ha_postgres',
+                    hostname := '10.35.209.23',
+                    port := 5432);
+
+To remove a host from the Paxos group, run the paxos_remove_host command on one of the existing members. The function works in a similar way to paxos_add_host.
+
+    SELECT paxos_remove_host(
+                    current_proposer_id := 'node-a/1249',
+                    current_group_id := 'ha_postgres',
+                    hostname := '10.35.209.23',
+                    port := 5432);
+
+The paxos_apply function executes all SQL queries in the log for group ha_postgres that have not yet been executed up to and including round number 3:
+
+    SELECT * FROM paxos_apply(
+                    current_proposer_id := 'node-a/1249',
+                    current_group_id := 'ha_postgres',
+                    max_round_num := 3);
+
+The paxos_apply_and_append function appends a SQL query to the log after ensuring that all queries that will preceed it in the log have been executed:
+
+    SELECT * FROM paxos_apply_and_append(
+                    current_proposer_id := 'node-a/1249',
+                    current_group_id := 'ha_postgres',
+                    proposed_value := 'INSERT INTO coordinates VALUES (3,3)');
     
 
 Copyright © 2015 Citus Data, Inc.
