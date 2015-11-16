@@ -25,7 +25,7 @@ To do table replication, pg_paxos uses PostgreSQL's executor hooks. To activate 
     shared_preload_libraries = 'pg_paxos'
     pg_paxos.node_id = '<some-unique-name>'
 
-## Usage
+## Using Paxos UDFs
     
 The following query appends value 'primary = ip-10-11-204-31.ec2.internal' to the Multi-Paxos log for the group ha_postgres:
 
