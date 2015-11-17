@@ -398,7 +398,7 @@ PrepareConsistentRead(char *groupId)
 	while (maxAppliedRoundId < maxRoundId)
 	{
 		PaxosEnabled = false;
-		PaxosApplyLog(groupId, proposerId, maxRoundId);
+		maxAppliedRoundId = PaxosApplyLog(groupId, proposerId, maxRoundId);
 		PaxosEnabled = true;
 		CommandCounterIncrement();
 
