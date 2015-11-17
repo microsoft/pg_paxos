@@ -134,7 +134,9 @@ To remove a host from the Paxos group, run the paxos_remove_host command on one 
                     hostname := '10.35.209.23',
                     port := 5432);
 
-The paxos_apply_log function executes all SQL queries in the log for a given group  that have not yet been executed up to and including round number max_round_num:
+The following functions are called automatically when using table replications, but may be useful for understanding the internals of pg_paxos.
+
+The paxos_apply_log function executes all SQL queries in the log for a given group that have not yet been executed up to and including round number max_round_num:
 
     SELECT * FROM paxos_apply_log(
                     current_proposer_id := 'node-a/1251',
