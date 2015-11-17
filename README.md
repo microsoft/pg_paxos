@@ -45,7 +45,7 @@ The latest value in the Paxos log can be retrieved using:
 
 ## Using Table Replication
 
-pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind before the read.
+pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind at the start of the read.
 
 An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After adding the metadata on *all nodes*, all writes to the coordinates table are replicated to the other nodes.
 
