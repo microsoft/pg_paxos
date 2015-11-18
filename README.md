@@ -136,7 +136,7 @@ To remove a host from the Paxos group, run the paxos_remove_host command on one 
 
 ## Internal Table Replication UDFs
 
-The following functions are called automatically when using table replications when a query is performed, but may be useful for understanding the internals of pg_paxos.
+The following functions are called automatically when using table replications when a query is performed. We show how to call them explicitly to clarify the internals of pg_paxos.
 
 The paxos_apply_log function executes all SQL queries in the log for a given group that have not yet been executed up to and including round number max_round_num:
 
