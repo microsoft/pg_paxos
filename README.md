@@ -83,9 +83,9 @@ An example of how pg_paxos replicates the metadata:
     Type "help" for help.
 
     postgres=# SELECT * FROM coordinates ;
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (1,1);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (1,1);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (2,2);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (2,2);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
      x | y
     ---+---
@@ -101,11 +101,11 @@ An example of how pg_paxos replicates the metadata:
     Type "help" for help.
     
     postgres=# SELECT * FROM coordinates ;
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (1,1);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (1,1);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (2,2);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (2,2);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
-    NOTICE:  Executing: UPDATE coordinates SET x = x * 10;
+    DEBUG:  Executing: UPDATE coordinates SET x = x * 10;
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
      x  | y
     ----+---
