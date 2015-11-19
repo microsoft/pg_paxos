@@ -113,9 +113,7 @@ An example of how pg_paxos replicates the metadata:
      20 | 2
     (2 rows)
 
-By default, pg_paxos asks other nodes for the highest accepted round number in the log before every read. It then applies the SQL queries in the log up to and including the highest accepted round number, which ensures strong consistency.
-
-In some cases, low read latencies may be preferable to strong consistency. The pg_paxos.consistency_model setting can be changed to 'optimistic', in which case the node assumes it has already learned about preceding writes. The optimistic consistency model provides read-your-writes consistency in the absence of failure, but may return older results when failures occur.
+By default, pg_paxos asks other nodes for the highest accepted round number in the log before every read. It then applies the SQL queries in the log up to and including the highest accepted round number, which ensures strong consistency. In some cases, low read latencies may be preferable to strong consistency. The pg_paxos.consistency_model setting can be changed to 'optimistic', in which case the node assumes it has already learned about preceding writes. The optimistic consistency model provides read-your-writes consistency in the absence of failure, but may return older results when failures occur.
 
 The consistency model can be changed in the session:
 
