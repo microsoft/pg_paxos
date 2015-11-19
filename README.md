@@ -2,7 +2,7 @@
 
 This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and basic table replication through Paxos. It is in a very early stage, consider it primarily for educational purposes. 
 
-pg_paxos can be used to replicate a table across multiple PostgreSQL servers. Every INSERT/UPDATE/DELETE on a replicated table is logged through Paxos. When a query is performed on the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, providing strong consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (e.g. 2 out of 5). 
+pg_paxos can be used to replicate a table across multiple PostgreSQL servers. Every INSERT/UPDATE/DELETE on a replicated table is logged through Paxos. When a query is performed on the table, pg_paxos first ensures that all preceding queries in the Multi-Paxos log have been applied, providing strong consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (e.g. 2 out of 5). 
 
 ## Installation
 
@@ -36,7 +36,7 @@ The following query appends value 'primary = ip-10-11-204-31.ec2.internal' to th
 
 current_proposer_id is a value that should be unique across the cluster for the given group and round. This is mainly used to determine which proposal was accepted when two proposers propose the same value.
 
-The latest value in the Paxos log can be retrieved using:
+The latest value in the Multi-Paxos log can be retrieved using:
 
     SELECT * FROM paxos(
                     current_proposer_id := 'node-a/1248',
@@ -45,7 +45,7 @@ The latest value in the Paxos log can be retrieved using:
 
 ## Using Table Replication
 
-pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind at the start of the read.
+pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Multi-Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind at the start of the read.
 
 An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After adding the metadata on *all nodes*, all writes to the coordinates table are replicated to the other nodes.
 
@@ -113,7 +113,18 @@ An example of how pg_paxos replicates the metadata:
      20 | 2
     (2 rows)
 
+By default, pg_paxos asks other nodes for the highest accepted round number in the log before every read. It then applies the SQL queries in the log up to and including the highest accepted round number, which ensures strong consistency.
 
+In some cases, low read latencies may be preferable to strong consistency. The pg_paxos.consistency_model setting can be changed to 'optimistic', in which case the node assumes it has already learned about preceding writes. The optimistic consistency model provides read-your-writes consistency in the absence of failure, but may return older results when failures occur.
+
+The consistency model can be changed in the session:
+
+    SET pg_paxos.consistency_model TO 'optimistic';
+    
+To switch back to strong consistency:
+
+    SET pg_paxos.consistency_model TO 'strong';
+    
 ## Advanced Table Replication UDFs
 
 When using pg_paxos for table replication, items in the log are all SQL queries. This property can also be used to perform membership changes.
@@ -138,14 +149,19 @@ To remove a host from the Paxos group, run the paxos_remove_host command on one 
 
 The following functions are called automatically when using table replications when a query is performed. We show how to call them explicitly to clarify the internals of pg_paxos.
 
-The paxos_apply_log function executes all SQL queries in the log for a given group that have not yet been executed up to and including round number max_round_num:
+The paxos_apply_log function (called on SELECT) executes all SQL queries in the log for a given group that have not yet been executed up to and including round number max_round_num.
 
     SELECT * FROM paxos_apply_log(
                     current_proposer_id := 'node-a/1251',
                     current_group_id := 'ha_postgres',
                     max_round_num := 3);
 
-The paxos_apply_and_append function appends a SQL query to the log after ensuring that all queries that will preceed it in the log have been executed:
+The paxos_max_group_round function queries a majority of hosts for their highest accepted round number. The round number returned by paxos_max_group_round will be greater or equal to any round on which there is consensus (a majority has accepted) at the start of the call to paxos_max_group_round. Therefore, a node is guaranteed to see any preceding write if it applies the log up to that round number. 
+
+    SELECT * FROM paxos_max_group_round(
+                    current_group_id := 'ha_postgres');
+
+The paxos_apply_and_append function (called on writes) appends a SQL query to the log after ensuring that all queries that will preceed it in the log have been executed:
 
     SELECT * FROM paxos_apply_and_append(
                     current_proposer_id := 'node-a/1252',
