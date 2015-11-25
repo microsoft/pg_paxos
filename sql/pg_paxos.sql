@@ -383,7 +383,7 @@ BEGIN
 			/* Check whether I'm competing with someone */
 			SELECT * INTO max_prepare_response
 			FROM prepare_responses
-			ORDER BY proposal_num DESC, proposer_id DESC LIMIT 1;
+			ORDER BY min_proposal_num DESC, proposer_id DESC LIMIT 1;
 
 			IF max_prepare_response.min_proposal_num = current_proposal_num THEN
 				RAISE DEBUG 'competing with %, retrying after random back-off',
