@@ -1,8 +1,49 @@
 # pg_paxos
 
-This PostgreSQL extension provides a basic implementation of the Paxos algorithm in PL/pgSQL and basic table replication through Paxos. It is in an early stage, consider it primarily for educational purposes. 
+This PostgreSQL extension provides a basic implementation of the [Paxos algorithm](http://research.microsoft.com/en-us/um/people/lamport/pubs/paxos-simple.pdf) in PL/pgSQL and basic table replication through Paxos. It is in an early stage, expect some rough edges.
 
-pg_paxos can be used to replicate a table across multiple PostgreSQL servers. Every INSERT/UPDATE/DELETE on a replicated table is logged through Paxos. When a query is performed on the table, pg_paxos first ensures that all preceding queries in the Paxos log have been applied, providing strong consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (e.g. 2 out of 5). 
+pg_paxos can be used to replicate a table across multiple PostgreSQL servers. Every INSERT/UPDATE/DELETE on a replicated table is logged through Paxos. When a query is performed on the table, pg_paxos first ensures that all preceding queries in the Multi-Paxos log have been applied, providing strong consistency. By using the Paxos algorithm, pg_paxos is also robust to failure of a minority of nodes (read: servers), e.g. 2 out of 5. 
+
+## The Paxos Algorithm
+
+paxos(k,v) is a function that returns the same value on all nodes in a group for a certain key (k), and the value is one of the inputs (v). For example, a node might call paxos('leader','primary = node-a') to assign a permanent group leader. paxos(k,v) first picks a proposal number n (usually 0) and then tries to get a value accepted by a majority of nodes in 2 phases:
+
+1. a) ask a majority of nodes to reject proposals for key k with a number smaller than n (or equal with lower node id), and return any previously accepted value and its proposal number<br/>
+   b) if a value was already accepted by one or more nodes, then v takes on the value with the highest proposal number
+2. ask responders from phase 1 to accept proposal n with value v for key k
+
+If in either phase the proposer cannot get confirmation from the majority, either due to failure or due to a rejection based on the proposal number, then it restarts with n = the highest proposal number in responses + 1, until a proposal succeeds in which case the function returns v. 
+
+- 1a. ensures that the proposer has exclusive access among the majority, it's basically a lock with preemption
+- 1b. ensures that a value is never changed once the majority accepts a value, since the proposer cannot get a new majority without at least one node having the existing value
+- 2. achieves consensus if the majority lock has not been preempted, which implies that any other proposal still needs to complete 1a for at least one node in the majority and will thus see the value in 1b
+
+Any subsequent proposal will use the same value in phase 2, and therefore paxos always returns the same value on all nodes.
+
+## Multi-Paxos
+
+Once a majority accepts a value, it can never be changed. However, Paxos can be used to implement a distributed log by using the index (round) in the log as a key. The log can be used to replicate a sequence of writes to a common, initial state. This technique is typically referred to as Multi-Paxos.
+
+To append a new write to the log, a node needs to reach consensus on its write in a given round and apply all preceding writes. This may require several attempts if other nodes are trying to reach consensus on the same round. Heavily simplified, writing to the Multi-Paxos log might look as follows:
+
+    round = last_applied_round+1
+    
+    while((c = paxos(round,v)) != v) 
+        execute(c)
+        last_applied_round = round
+        round++
+
+To perform a consistent read, a node needs to confirm the highest accepted round number in the group and execute all items in the log up to that round number. Some rounds may have been abandoned before consensus was reached, in which case the reader can force consensus by proposing a value that does not change the state.
+
+    round = last_applied_round+1
+    max_round_num = max_accepted_round()
+    
+    while(round <= max_round_num)
+        execute(paxos(round,''))
+        last_applied_round = round
+        round++
+
+While the examples above are heavily simplified, pg_paxos follows the same general approach, using SQL queries as log items.
 
 ## Installation
 
@@ -13,7 +54,7 @@ The easiest way to install pg_paxos is to build the sources from GitHub.
     PATH=/usr/local/pgsql/bin/:$PATH make
     sudo PATH=/usr/local/pgsql/bin/:$PATH make install
 
-pg_paxos requires the dblink extension to be installed. After installing both extensions run:
+pg_paxos requires the dblink extension that you'll find in the contrib directory of PostgreSQL to be installed. After installing both extensions run:
 
     -- run via psql on each node:
     CREATE EXTENSION dblink;
@@ -25,27 +66,9 @@ To do table replication, pg_paxos uses PostgreSQL's executor hooks to log SQL qu
     shared_preload_libraries = 'pg_paxos'
     pg_paxos.node_id = '<some-unique-name>'
 
-## Using Paxos UDFs
-    
-The following query appends value 'primary = ip-10-11-204-31.ec2.internal' to the Multi-Paxos log for the group ha_postgres:
+## Setting up Table Replication
 
-    SELECT * FROM paxos_append(
-                    current_proposer_id := 'node-a/1247',
-                    current_group_id := 'ha_postgres',
-                    proposed_value := 'primary = ip-10-11-204-31.ec2.internal');
-
-current_proposer_id is a value that should be unique across the cluster for the given group and round. This is mainly used to determine which proposal was accepted when two proposers propose the same value.
-
-The latest value in the Paxos log can be retrieved using:
-
-    SELECT * FROM paxos(
-                    current_proposer_id := 'node-a/1248',
-                    current_group_id := 'ha_postgres',
-                    current_round_num := paxos_max_group_round('ha_postgres'));
-
-## Using Table Replication
-
-pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind. 
+pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Multi-Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind at the start of the read.
 
 An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After adding the metadata on *all nodes*, all writes to the coordinates table are replicated to the other nodes.
 
@@ -83,9 +106,9 @@ An example of how pg_paxos replicates the metadata:
     Type "help" for help.
 
     postgres=# SELECT * FROM coordinates ;
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (1,1);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (1,1);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (2,2);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (2,2);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
      x | y
     ---+---
@@ -101,11 +124,11 @@ An example of how pg_paxos replicates the metadata:
     Type "help" for help.
     
     postgres=# SELECT * FROM coordinates ;
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (1,1);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (1,1);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
-    NOTICE:  Executing: INSERT INTO coordinates VALUES (2,2);
+    DEBUG:  Executing: INSERT INTO coordinates VALUES (2,2);
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
-    NOTICE:  Executing: UPDATE coordinates SET x = x * 10;
+    DEBUG:  Executing: UPDATE coordinates SET x = x * 10;
     CONTEXT:  SQL statement "SELECT paxos_apply_log($1,$2,$3)"
      x  | y
     ----+---
@@ -113,8 +136,17 @@ An example of how pg_paxos replicates the metadata:
      20 | 2
     (2 rows)
 
+By default, pg_paxos asks other nodes for the highest accepted round number in the log before every read. It then applies the SQL queries in the log up to and including the highest accepted round number, which ensures strong consistency. In some cases, low read latencies may be preferable to strong consistency. The pg_paxos.consistency_model setting can be changed to 'optimistic', in which case the node assumes it has already learned about preceding writes. The optimistic consistency model provides read-your-writes consistency in the absence of failure, but may return older results when failures occur.
 
-## Advanced Table Replication UDFs
+The consistency model can be changed in the session:
+
+    SET pg_paxos.consistency_model TO 'optimistic';
+    
+To switch back to strong consistency:
+
+    SET pg_paxos.consistency_model TO 'strong';
+
+## Membership changes
 
 When using pg_paxos for table replication, items in the log are all SQL queries. This property can also be used to perform membership changes.
 
@@ -134,19 +166,45 @@ To remove a host from the Paxos group, run the paxos_remove_host command on one 
                     hostname := '10.35.209.23',
                     port := 5432);
 
-The paxos_apply_log function executes all SQL queries in the log for a given group  that have not yet been executed up to and including round number max_round_num:
+## Internal Table Replication functions
 
-    SELECT * FROM paxos_apply_log(
-                    current_proposer_id := 'node-a/1251',
-                    current_group_id := 'ha_postgres',
-                    max_round_num := 3);
+The following functions are called automatically when using table replications when a query is performed. We show how to call them explicitly to clarify the internals of pg_paxos.
 
-The paxos_apply_and_append function appends a SQL query to the log after ensuring that all queries that will preceed it in the log have been executed:
+The paxos_apply_and_append function (called on writes) appends a SQL query to the log after ensuring that all queries that will preceed it in the log have been executed. 
 
     SELECT * FROM paxos_apply_and_append(
-                    current_proposer_id := 'node-a/1252',
+                    current_proposer_id := 'node-a/1251',
                     current_group_id := 'ha_postgres',
                     proposed_value := 'INSERT INTO coordinates VALUES (3,3)');
     
+The paxos_apply_log function (called on SELECT) executes all SQL queries in the log for a given group that have not yet been executed up to and including round number max_round_num.
+
+    SELECT * FROM paxos_apply_log(
+                    current_proposer_id := 'node-a/1252',
+                    current_group_id := 'ha_postgres',
+                    max_round_num := 3);
+
+The paxos_max_group_round function queries a majority of hosts for their highest accepted round number. The round number returned by paxos_max_group_round will be greater or equal to any round on which there is consensus (a majority has accepted) at the start of the call to paxos_max_group_round. Therefore, a node is guaranteed to see any preceding write if it applies the log up to that round number. 
+
+    SELECT * FROM paxos_max_group_round(
+                    current_group_id := 'ha_postgres');
+
+## Using Paxos functions directly
+    
+You can also implement an arbitrary distributed log using pg_paxos by calling the paxos functions directly. The following query appends value 'primary = node-a' to the Multi-Paxos log for the group ha_postgres:
+
+    SELECT * FROM paxos_append(
+                    current_proposer_id := 'node-a/1253',
+                    current_group_id := 'ha_postgres',
+                    proposed_value := 'primary = node-a');
+
+current_proposer_id is a value that should be unique across the cluster for the given group and round. This is mainly used to determine which proposal was accepted when two proposers propose the same value.
+
+The latest value in the Multi-Paxos log can be retrieved using:
+
+    SELECT * FROM paxos(
+                    current_proposer_id := 'node-a/1254',
+                    current_group_id := 'ha_postgres',
+                    current_round_num := paxos_max_group_round('ha_postgres'));
 
 Copyright © 2015 Citus Data, Inc.
