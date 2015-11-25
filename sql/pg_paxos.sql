@@ -73,7 +73,7 @@ CREATE SCHEMA pgp_metadata
  *
  * promised - true if the acceptor participates, false otherwise
  * proposer_id - if a higher proposal was received, the proposer id
- * proposal_num - if a higher proposal was received, its number
+ * min_proposal_num - if a higher proposal was received, its number
  * value_id - if a proposal was previously accepted, its value identifier
  * value - if a proposal was previously accepted, its value
  * accepted_proposal_num - if a proposal was previously accepted, its number
@@ -81,7 +81,7 @@ CREATE SCHEMA pgp_metadata
 CREATE TYPE prepare_response AS (
 	promised boolean,
 	proposer_id text,
-	proposal_num bigint,
+	min_proposal_num bigint,
 	value_id text,
 	value text,
 	accepted_proposal_num bigint
@@ -91,11 +91,11 @@ CREATE TYPE prepare_response AS (
  * Response from acceptor to accept requests.
  *
  * accepted - false if a higher proposal was received, true otherwise
- * proposal_num - if a higher proposal was received, its number
+ * min_proposal_num - if a higher proposal was received, its number
  */
 CREATE TYPE accept_response AS (
 	accepted boolean,
-	proposal_num bigint
+	min_proposal_num bigint
 );
 
 /*
@@ -314,7 +314,7 @@ BEGIN
 
 	CREATE TEMPORARY TABLE IF NOT EXISTS accept_responses (
 		accepted boolean,
-		proposal_num bigint
+		min_proposal_num bigint
 	);
 
 	WHILE NOT done LOOP
@@ -437,7 +437,7 @@ BEGIN
 			PERFORM pg_sleep(1);
 
 			/* Make sure current_proposal_num is higher than any other known proposal */
-			SELECT greatest(max(proposal_num), current_proposal_num) + 1
+			SELECT greatest(max(min_proposal_num), current_proposal_num) + 1
 			INTO current_proposal_num
 			FROM accept_responses;
 
