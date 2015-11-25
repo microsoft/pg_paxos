@@ -318,8 +318,8 @@ BEGIN
 	);
 
 	WHILE NOT done LOOP
-		TRUNCATE prepare_responses;
-		TRUNCATE accept_responses;
+		DELETE FROM prepare_responses;
+		DELETE FROM accept_responses;
 
 		/* Try to open connections to all hosts in the group */
 		SELECT paxos_open_connections(num_hosts) INTO num_open_connections;
@@ -945,7 +945,7 @@ BEGIN
 
 	END IF;
 
-	TRUNCATE hosts;
+	DELETE FROM hosts;
 
 	INSERT INTO hosts
 	SELECT format('%s:%s', node_name, node_port) AS connection_name,
@@ -1014,9 +1014,10 @@ BEGIN
 
 		IF host.connected IS NULL THEN
 			/* Open new connection */
-			connection_string := format('hostaddr=%s port=%s connect_timeout=10',
+			connection_string := format('hostaddr=%s port=%s dbname=%s connect_timeout=5',
 										host.node_name,
-										host.node_port);
+										host.node_port,
+										current_database());
 
 			BEGIN
 				PERFORM dblink_connect(host.connection_name, connection_string);
