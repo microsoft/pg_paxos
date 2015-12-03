@@ -1,5 +1,5 @@
 # pg_paxos extension
 comment = 'functions that implement the Paxos distributed consensus algorithm'
-default_version = '1.0'
+default_version = '0.1'
 module_pathname = '$libdir/pg_paxos'
 requires = 'dblink'
