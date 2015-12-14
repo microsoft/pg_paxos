@@ -1014,7 +1014,7 @@ BEGIN
 
 		IF host.connected IS NULL THEN
 			/* Open new connection */
-			connection_string := format('hostaddr=%s port=%s dbname=%s connect_timeout=5',
+			connection_string := format('host=%s port=%s dbname=%s connect_timeout=5',
 										host.node_name,
 										host.node_port,
 										current_database());
