@@ -57,7 +57,6 @@ static char *DeterminePaxosGroup(List *rangeTableList);
 static Oid ExtractTableOid(Node *node);
 static void PrepareConsistentWrite(char *groupId, const char *sqlQuery);
 static void PrepareConsistentRead(char *groupId);
-static void FinishPaxosTransaction(XactEvent event, void *arg);
 static void PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 								  ProcessUtilityContext context, ParamListInfo params,
 								  DestReceiver *dest, char *completionTag);
@@ -110,8 +109,8 @@ _PG_init(void)
 
 	DefineCustomBoolVariable("pg_paxos.enabled",
 							 "If enabled, pg_paxos handles queries on Paxos tables",
-							 NULL, &PaxosEnabled, true, PGC_USERSET, 0, NULL, NULL,
-							 NULL);
+							 NULL, &PaxosEnabled, true, PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 
 	DefineCustomStringVariable("pg_paxos.node_id",
 							   "Unique node ID to use in Paxos interactions", NULL,
@@ -123,8 +122,6 @@ _PG_init(void)
 							 NULL, &ReadConsistencyModel, STRONG_CONSISTENCY,
 							 consistency_model_options, PGC_USERSET, 0, NULL, NULL,
 							 NULL);
-
-	RegisterXactCallback(FinishPaxosTransaction, NULL);
 }
 
 
@@ -360,9 +357,7 @@ PrepareConsistentWrite(char *groupId, const char *sqlQuery)
 	/*
 	 * Log the current query through Paxos.
 	 */
-	PaxosEnabled = false;
 	loggedRoundId = PaxosAppend(groupId, proposerId, sqlQuery);
-	PaxosEnabled = true;
 	CommandCounterIncrement();
 
 	/*
@@ -390,16 +385,14 @@ PrepareConsistentRead(char *groupId)
 	{
 		maxRoundId = PaxosMaxAcceptedRound(groupId);
 	}
-	else /* ReadyConsistencyModel == OPTIMISTIC_CONSISTENCY */
+	else /* ReadConsistencyModel == OPTIMISTIC_CONSISTENCY */
 	{
 		maxRoundId = PaxosMaxLocalConsensusRound(groupId);
 	}
 
 	while (maxAppliedRoundId < maxRoundId)
 	{
-		PaxosEnabled = false;
 		maxAppliedRoundId = PaxosApplyLog(groupId, proposerId, maxRoundId);
-		PaxosEnabled = true;
 		CommandCounterIncrement();
 
 		if (ReadConsistencyModel == STRONG_CONSISTENCY)
@@ -416,22 +409,6 @@ PrepareConsistentRead(char *groupId)
 			}
 		}
 	}
-}
-
-
-/*
- * FinishPaxosTransaction is called at the end of a transaction and
- * mainly serves to reset the PaxosEnabled flag in case of failure.
- */
-static void
-FinishPaxosTransaction(XactEvent event, void *arg)
-{
-	if (event != XACT_EVENT_COMMIT && event != XACT_EVENT_ABORT)
-	{
-		return;
-	}
-	
-	PaxosEnabled = true;
 }
 
 
