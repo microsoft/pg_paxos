@@ -1145,7 +1145,6 @@ $BODY$ LANGUAGE plpgsql;
  * group.
  */
 CREATE FUNCTION paxos_join_group(
-							current_proposer_id text,
 							current_group_id text,
 							existing_hostname text,
 							existing_port int,
@@ -1154,6 +1153,7 @@ CREATE FUNCTION paxos_join_group(
 RETURNS void
 AS $BODY$
 DECLARE
+	current_proposer_id text := own_hostname||':'||own_port||'/'||txid_current();
 	connection_string text;
 	group_query text;
 	table_query text;
