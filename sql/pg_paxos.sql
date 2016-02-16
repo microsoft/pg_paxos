@@ -1238,6 +1238,11 @@ BEGIN
 				current_group_id,
 				own_hostname,
 				own_port);
+
+EXCEPTION WHEN OTHERS THEN
+        PERFORM dblink_exec('paxos_join_group', 'ABORT');
+        PERFORM dblink_disconnect('paxos_join_group');
+        RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
 END;
 $BODY$ LANGUAGE plpgsql;
 
