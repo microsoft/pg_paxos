@@ -1091,6 +1091,158 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 /*
+ * paxos_create_group creates a new Paxos group with a single member.
+ */
+CREATE FUNCTION paxos_create_group(
+							current_group_id text,
+							founder_hostname text,
+							founder_port int)
+RETURNS void
+AS $BODY$
+BEGIN
+	INSERT INTO pgp_metadata.group (
+			group_id,
+			last_applied_round)
+	VALUES (current_group_id,
+			0);
+
+	INSERT INTO pgp_metadata.host (
+			group_id,
+			node_name,
+			node_port,
+			min_round_num)
+	VALUES (current_group_id,
+			founder_hostname,
+			founder_port,
+			1);
+
+	INSERT INTO pgp_metadata.round(
+			group_id,
+			round_num,
+			min_proposal_num,
+			proposer_id,
+			value_id,
+			value,
+			accepted_proposal_num,
+			consensus)
+	VALUES (current_group_id,
+			0,
+			0,
+			'pg_paxos initial',
+			'pg_paxos initial',
+			format('INSERT INTO pgp_metadata.host VALUES (%s,%s,%s)',
+				   quote_literal(current_group_id),
+				   quote_literal(founder_hostname),
+				   founder_port),
+			0,
+			true);
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
+/*
+ * paxos_join_group joins the node on which the function is called to a Paxos
+ * group.
+ */
+CREATE FUNCTION paxos_join_group(
+							current_proposer_id text,
+							current_group_id text,
+							existing_hostname text,
+							existing_port int,
+							own_hostname text,
+							own_port int)
+RETURNS void
+AS $BODY$
+DECLARE
+	connection_string text;
+	group_query text;
+	table_query text;
+	replicated_table record;
+	round_query text;
+	host_query text;
+BEGIN
+	/* Get the host table of the remote node, a host table is always correct */
+	connection_string := format('host=%s port=%s dbname=%s connect_timeout=5',
+								existing_hostname,
+								existing_port,
+								current_database());
+
+	PERFORM dblink_connect('paxos_join_group', connection_string);
+
+	/* Ensure we get a consistent snapshot */
+	PERFORM dblink_exec('paxos_join_group', 'BEGIN');
+	PERFORM dblink_exec('paxos_join_group', 'SET TRANSACTION '||
+											'ISOLATION LEVEL SERIALIZABLE');
+	PERFORM dblink_exec('paxos_join_group', 'SET LOCAL pg_paxos.enabled TO false');
+
+	/* Copy the group table from the existing node */
+	group_query := format('SELECT (%s) '||
+						  'FROM pgp_metadata.group '||
+						  'WHERE group_id = %s',
+						  table_column_names('pgp_metadata.group'),
+						  quote_literal(current_group_id));
+
+	INSERT INTO pgp_metadata.group SELECT (res).*
+	FROM dblink('paxos_join_group', group_query) AS (res pgp_metadata.group);
+
+	/* Copy the hosts table from the existing node */
+	host_query := format('SELECT (%s) '||
+						 'FROM pgp_metadata.host '||
+						 'WHERE group_id = %s',
+						 table_column_names('pgp_metadata.host'),
+						 quote_literal(current_group_id));
+
+	INSERT INTO pgp_metadata.host SELECT (res).*
+	FROM dblink('paxos_join_group', host_query) AS (res pgp_metadata.host);
+
+	/* Copy the replicated tables table from the existing node */
+	table_query := format('SELECT (%s) '||
+						  'FROM pgp_metadata.replicated_tables '||
+						  'WHERE group_id = %s',
+						  table_column_names('pgp_metadata.replicated_tables'),
+						  quote_literal(current_group_id));
+
+	INSERT INTO pgp_metadata.replicated_tables SELECT (res).*
+	FROM dblink('paxos_join_group', table_query) AS (res pgp_metadata.replicated_tables);
+
+	SET LOCAL pg_paxos.enabled TO false;
+
+	/* Copy the replicated tables from the existing node */
+	FOR replicated_table IN
+	SELECT * FROM pgp_metadata.replicated_tables WHERE group_id = current_group_id LOOP
+
+		EXECUTE format('INSERT INTO %I SELECT (res).* '||
+					   'FROM dblink(''paxos_join_group'', ''SELECT (%s) FROM %I'') AS (res %I)',
+					   quote_ident(replicated_table.table_oid),
+					   table_column_names(replicated_table.table_oid),
+					   quote_ident(replicated_table.table_oid),
+					   quote_ident(replicated_table.table_oid));
+	END LOOP;
+
+	/* Copy the round table from the existing node */
+	round_query := format('SELECT (%s) '||
+						  'FROM pgp_metadata.round '||
+						  'WHERE group_id = %s',
+						  table_column_names('pgp_metadata.round'),
+						  quote_literal(current_group_id));
+
+	INSERT INTO pgp_metadata.round SELECT (res).*
+	FROM dblink('paxos_join_group', round_query) AS (res pgp_metadata.round);
+
+	PERFORM dblink_exec('paxos_join_group', 'END');
+	PERFORM dblink_disconnect('paxos_join_group');
+
+	/* Start actively participating in the Paxos group */
+	PERFORM paxos_add_host(
+				current_proposer_id,
+				current_group_id,
+				own_hostname,
+				own_port);
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
+/*
  * paxos_replicate_table replicates the table identified by new_table_oid within
  * the Paxos group identified by current_group_id.
  */
@@ -1101,9 +1253,29 @@ RETURNS void
 AS $BODY$
 BEGIN
 	INSERT INTO pgp_metadata.replicated_tables (
-			table_name,
+			table_oid,
 			group_id)
 	VALUES (new_table_oid,
 			current_group_id);
 END;
 $BODY$ LANGUAGE plpgsql;
+
+
+/*
+ * table_column_names returns a comma-separate string of column names.
+ */
+CREATE FUNCTION table_column_names(table_id regclass)
+RETURNS text
+AS $BODY$
+DECLARE
+	column_string text;
+BEGIN
+	SELECT string_agg(col,',') INTO column_string
+	FROM (SELECT a.attname col
+		  FROM pg_attribute a
+		  WHERE attrelid = table_id AND attnum > 0 ORDER BY attnum) cols;
+
+	RETURN column_string;
+END;
+$BODY$ LANGUAGE plpgsql;
+
