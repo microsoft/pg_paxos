@@ -1213,10 +1213,10 @@ BEGIN
 
 		EXECUTE format('INSERT INTO %I SELECT (res).* '||
 					   'FROM dblink(''paxos_join_group'', ''SELECT (%s) FROM %I'') AS (res %I)',
-					   quote_ident(replicated_table.table_oid),
+					   quote_ident(replicated_table.table_oid::text),
 					   table_column_names(replicated_table.table_oid),
-					   quote_ident(replicated_table.table_oid),
-					   quote_ident(replicated_table.table_oid));
+					   quote_ident(replicated_table.table_oid::text),
+					   quote_ident(replicated_table.table_oid::text));
 	END LOOP;
 
 	/* Copy the round table from the existing node */
