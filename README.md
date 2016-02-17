@@ -70,23 +70,28 @@ To do table replication, pg_paxos uses PostgreSQL's executor hooks to log SQL qu
 
 pg_paxos allows you to replicate a table across a group of servers. When a table is marked as replicated, pg_paxos intercepts all SQL queries on that table via the executor hooks and appends them to the Multi-Paxos log. Before a query is performed, preceding SQL queries in the log are executed to bring the table up-to-date. From the perspective of the user, the table always appears consistent, even though the physical representation of the table on disk may be behind at the start of the read.
 
-An example of setting up a replicated table on 3 servers that run on the same host (ports 5432, 9700, 9701) is given below. After adding the metadata on *all nodes*, all writes to the coordinates table are replicated to the other nodes.
+To set up Paxos group with a replicated table, first create the table on all the nodes:
 
     CREATE TABLE coordinates (
         x int,
         y int
     );
 
-    INSERT INTO pgp_metadata.group (group_id) VALUES ('mokka');
-    INSERT INTO pgp_metadata.host VALUES ('mokka', '127.0.0.1', 5432, 0);
-    INSERT INTO pgp_metadata.host VALUES ('mokka', '127.0.0.1', 9700, 0);
-    INSERT INTO pgp_metadata.host VALUES ('mokka', '127.0.0.1', 9701, 0);
-    INSERT INTO pgp_metadata.replicated_tables VALUES ('coordinates','mokka');
+Then, on one of the nodes, call paxos_create_group to create a named Paxos group with the node itself as its sole member, and call paxos_replicate_table to replicate a table within a group:
+
+    SELECT paxos_create_group('mokka', '10.0.0.1', 5432);
+    SELECT paxos_replicate_table('mokka', 'coordinates');
     
+To add another node (e.g. 10.0.0.49), connect to it and call paxos_join_group using the name of the group and the hostname of an existing node:
+    
+    SELECT paxos_join_group('mokka', '10.0.0.1', 5432, '10.0.0.49', 5432);
+    
+If you want to replicate an additional table after forming the group, then run paxos_replicate_table on all the nodes.
+
 An example of how pg_paxos replicates the metadata:
 
     [marco@marco-desktop pg_paxos]$ psql
-    psql (9.4.4)
+    psql (9.5.1)
     Type "help" for help.
 
     postgres=# INSERT INTO coordinates VALUES (1,1);
@@ -146,26 +151,6 @@ To switch back to strong consistency:
 
     SET pg_paxos.consistency_model TO 'strong';
 
-## Membership changes
-
-When using pg_paxos for table replication, items in the log are all SQL queries. This property can also be used to perform membership changes.
-
-To add a new host to a Paxos group, run the paxos_add_host function on one of the existing members. The paxos_add_host function logs a query that updates the membership table on all nodes and returns the round number in which the query was logged. Any call to paxos for a higher round will include the host in the group.
-
-    SELECT paxos_add_host(
-                    current_proposer_id := 'node-a/1249',
-                    current_group_id := 'ha_postgres',
-                    hostname := '10.35.209.23',
-                    port := 5432);
-
-To remove a host from the Paxos group, run the paxos_remove_host command on one of the existing members. The function works in a similar way to paxos_add_host.
-
-    SELECT paxos_remove_host(
-                    current_proposer_id := 'node-a/1250',
-                    current_group_id := 'ha_postgres',
-                    hostname := '10.35.209.23',
-                    port := 5432);
-
 ## Internal Table Replication functions
 
 The following functions are called automatically when using table replications when a query is performed. We show how to call them explicitly to clarify the internals of pg_paxos.
@@ -207,4 +192,4 @@ The latest value in the Multi-Paxos log can be retrieved using:
                     current_group_id := 'ha_postgres',
                     current_round_num := paxos_max_group_round('ha_postgres'));
 
-Copyright © 2015 Citus Data, Inc.
+Copyright © 2016 Citus Data, Inc.
