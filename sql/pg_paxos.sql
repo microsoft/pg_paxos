@@ -547,7 +547,7 @@ BEGIN
 
 	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		RETURN QUERY
-		SELECT (resp).* FROM dblink_get_result(host.connection_name)
+		SELECT (resp).* FROM dblink_get_result(host.connection_name, false)
 							 AS (resp accept_response);
 	END LOOP;
 
