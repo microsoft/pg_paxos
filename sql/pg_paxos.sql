@@ -508,7 +508,7 @@ BEGIN
 
 	PERFORM paxos_broadcast_query(prepare_query);
 
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		RETURN QUERY
 		SELECT (resp).* FROM dblink_get_result(host.connection_name, false)
 							 AS (resp prepare_response);
@@ -545,7 +545,7 @@ BEGIN
 
 	PERFORM paxos_broadcast_query(accept_query);
 
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		RETURN QUERY
 		SELECT (resp).* FROM dblink_get_result(host.connection_name)
 							 AS (resp accept_response);
@@ -582,7 +582,7 @@ BEGIN
 
 	PERFORM paxos_broadcast_query(confirm_query);
 
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp boolean);
 	END LOOP;
 
@@ -667,7 +667,7 @@ BEGIN
 
 	PERFORM paxos_broadcast_query(round_query);
 
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		SELECT resp INTO remote_round_num
 		FROM dblink_get_result(host.connection_name, false) AS (resp bigint);
 
@@ -934,9 +934,9 @@ BEGIN
 	IF NOT EXISTS (
 		SELECT relname
 		FROM pg_class
-		WHERE relnamespace = pg_my_temp_schema() AND relname = 'hosts') THEN
+		WHERE relnamespace = pg_my_temp_schema() AND relname = 'pg_paxos_hosts') THEN
 
-		CREATE TEMPORARY TABLE IF NOT EXISTS hosts (
+		CREATE TEMPORARY TABLE IF NOT EXISTS pg_paxos_hosts (
 			connection_name text,
 			node_name text,
 			node_port int,
@@ -945,9 +945,9 @@ BEGIN
 
 	END IF;
 
-	DELETE FROM hosts;
+	DELETE FROM pg_paxos_hosts;
 
-	INSERT INTO hosts
+	INSERT INTO pg_paxos_hosts
 	SELECT format('%s:%s', node_name, node_port) AS connection_name,
 		   node_name, node_port,
 		   false AS connected
@@ -957,7 +957,7 @@ BEGIN
 	  AND (max_round_num IS NULL OR current_round_num <= max_round_num)
 	GROUP BY node_name, node_port;
 
-	SELECT count(*) INTO num_hosts FROM hosts;
+	SELECT count(*) INTO num_hosts FROM pg_paxos_hosts;
 
 	RETURN num_hosts;
 END;
@@ -982,7 +982,7 @@ BEGIN
 
 	FOR host IN
 	SELECT h.connection_name, h.node_name, h.node_port, c.connected
-	FROM hosts h LEFT OUTER JOIN
+	FROM pg_paxos_hosts h LEFT OUTER JOIN
 		 (SELECT unnest AS connected
 		  FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
 
@@ -990,12 +990,14 @@ BEGIN
 			IF dblink_error_message(host.connection_name) = 'OK' THEN
 				/* We previously opened this connection */
 				num_open_connections := num_open_connections + 1;
-				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
+				UPDATE pg_paxos_hosts SET connected = true
+				WHERE connection_name = host.connection_name;
 			ELSE
 				/* Close connections that have errored out, will not be used next round */
 				RAISE WARNING 'connection error: %', dblink_error_message(host.connection_name);
 				PERFORM dblink_disconnect(host.connection_name);
-				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
+				UPDATE pg_paxos_hosts SET connected = false
+				WHERE connection_name = host.connection_name;
 			END IF;
 		END IF;
 	END LOOP;
@@ -1008,7 +1010,7 @@ BEGIN
 	/* Otherwise, try to open as many connections as possible (bias towards reads) */
 	FOR host IN
 	SELECT h.connection_name, h.node_name, h.node_port, c.connected
-	FROM hosts h LEFT OUTER JOIN
+	FROM pg_paxos_hosts h LEFT OUTER JOIN
 		 (SELECT unnest AS connected
 		  FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
 
@@ -1022,10 +1024,12 @@ BEGIN
 			BEGIN
 				PERFORM dblink_connect(host.connection_name, connection_string);
 				num_open_connections := num_open_connections + 1;
-				UPDATE hosts SET connected = true WHERE connection_name = host.connection_name;
+				UPDATE pg_paxos_hosts SET connected = true
+				WHERE connection_name = host.connection_name;
 			EXCEPTION WHEN OTHERS THEN
 				RAISE WARNING 'failed to connect to %:%', host.node_name, host.node_port;
-				UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
+				UPDATE pg_paxos_hosts SET connected = false
+				WHERE connection_name = host.connection_name;
 			END;
 		END IF;
 	END LOOP;
@@ -1044,12 +1048,13 @@ AS $BODY$
 DECLARE
 	host record;
 BEGIN
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		BEGIN
 			PERFORM dblink_send_query(host.connection_name, query_string);
 		EXCEPTION WHEN OTHERS THEN
 			PERFORM dblink_disconnect(host.connection_name);
-			UPDATE hosts SET connected = false WHERE connection_name = host.connection_name;
+			UPDATE pg_paxos_hosts SET connected = false
+			WHERE connection_name = host.connection_name;
 		END;
 	END LOOP;
 END;
@@ -1066,7 +1071,7 @@ AS $BODY$
 DECLARE
 	host record;
 BEGIN
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		/* Need to call get_result until it returns NULL to clear the connection */
 		PERFORM * FROM dblink_get_result(host.connection_name, false) AS (resp int);
 	END LOOP;
@@ -1083,7 +1088,7 @@ AS $BODY$
 DECLARE
 	host record;
 BEGIN
-	FOR host IN SELECT * FROM hosts WHERE connected LOOP
+	FOR host IN SELECT * FROM pg_paxos_hosts WHERE connected LOOP
 		PERFORM dblink_disconnect(host.connection_name);
 	END LOOP;
 END;
