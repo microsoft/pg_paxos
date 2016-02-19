@@ -711,9 +711,6 @@ BEGIN
 	/* Prevent other processes from applying the same log */
 	PERFORM pg_advisory_xact_lock(29030, hashtext(current_group_id));
 
-	/* Temporarily prevent pg_paxos from intercepting and logging queries */
-	SET LOCAL pg_paxos.enabled TO false;
-
 	SELECT last_applied_round INTO current_round_num
 	FROM pgp_metadata.group
 	WHERE group_id = current_group_id;
@@ -750,7 +747,6 @@ BEGIN
 	SET last_applied_round = max_round_num
 	WHERE group_id = current_group_id;
 
-	SET LOCAL pg_paxos.enabled TO true;
 	RETURN max_round_num;
 END;
 $BODY$ LANGUAGE 'plpgsql';
