@@ -671,8 +671,12 @@ BEGIN
 		SELECT resp INTO remote_round_num
 		FROM dblink_get_result(host.connection_name, false) AS (resp bigint);
 
-		IF remote_round_num IS NOT NULL AND remote_round_num > max_round_num THEN
-			max_round_num := remote_round_num;
+		IF remote_round_num IS NULL THEN
+			CONTINUE;
+		END IF;
+
+		IF remote_round_num > max_round_num THEN
+				max_round_num := remote_round_num;
 		END IF;
 
 		num_responses := num_responses + 1;
