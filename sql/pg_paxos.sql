@@ -604,7 +604,7 @@ AS $BODY$
 DECLARE
 	current_round_num bigint;
 	accepted_value text;
-	value_written boolean := false;
+	value_not_logged boolean := true;
 BEGIN
 
 	/*
@@ -616,14 +616,14 @@ BEGIN
 	SELECT Coalesce(max(round_num), -1) INTO current_round_num
 	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
-	WHILE NOT value_written LOOP
+	WHILE value_not_logged LOOP
 		current_round_num := current_round_num + 1;
 
-		SELECT paxos(
+		SELECT * FROM paxos(
 						current_proposer_id,
 						current_group_id,
 						current_round_num,
-						proposed_value) INTO accepted_value, value_written;
+						proposed_value) INTO accepted_value, value_not_logged;
 	END LOOP;
 
 	RETURN current_round_num;
@@ -764,13 +764,13 @@ RETURNS bigint
 AS $BODY$
 DECLARE
 	current_round_num bigint;
-	value_written bool := false;
+	value_not_logged boolean := true;
 	query text;
 BEGIN
 	SELECT Coalesce(max(round_num), -1) INTO current_round_num
 	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
-	WHILE NOT value_written LOOP
+	WHILE value_not_logged LOOP
 		PERFORM paxos_apply_log(
 						current_proposer_id,
 						current_group_id,
@@ -778,11 +778,11 @@ BEGIN
 
 		current_round_num := current_round_num + 1;
 
-		SELECT paxos(
+		SELECT * FROM paxos(
 					current_proposer_id,
 					current_group_id,
 					current_round_num,
-					proposed_value) INTO query, value_written;
+					proposed_value) INTO query, value_not_logged;
 	END LOOP;
 
 	RETURN current_round_num;
@@ -805,12 +805,12 @@ DECLARE
 	current_round_num bigint;
 	proposed_value text;
 	accepted_value text;
-	value_written boolean := false;
+	value_not_logged boolean := true;
 BEGIN
 	SELECT Coalesce(max(round_num), -1) INTO current_round_num
 	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
-	WHILE NOT value_written LOOP
+	WHILE value_not_logged LOOP
 		PERFORM paxos_apply_log(
 						current_proposer_id,
 						current_group_id,
@@ -823,11 +823,11 @@ BEGIN
 								 quote_literal(hostname),
 								 port,
 								 current_round_num+1);
-		SELECT paxos(
+		SELECT * FROM paxos(
 						current_proposer_id,
 						current_group_id,
 						current_round_num,
-						proposed_value) INTO accepted_value, value_written;
+						proposed_value) INTO accepted_value, value_not_logged;
 	END LOOP;
 
 	RETURN current_round_num;
@@ -850,12 +850,12 @@ DECLARE
 	current_round_num bigint;
 	proposed_value text;
 	accepted_value text;
-	value_written boolean := false;
+	value_not_logged boolean := true;
 BEGIN
 	SELECT Coalesce(max(round_num), -1) INTO current_round_num
 	FROM pgp_metadata.round WHERE group_id = current_group_id;
 
-	WHILE NOT value_written LOOP
+	WHILE value_not_logged LOOP
 		PERFORM paxos_apply_log(
 						current_proposer_id,
 						current_group_id,
@@ -873,11 +873,11 @@ BEGIN
 								 quote_literal(hostname),
 								 port);
 
-		SELECT paxos(
+		SELECT * FROM paxos(
 						current_proposer_id,
 						current_group_id,
 						current_round_num,
-						proposed_value) INTO accepted_value, value_written;
+						proposed_value) INTO accepted_value, value_not_logged;
 	END LOOP;
 
 	RETURN current_round_num;
