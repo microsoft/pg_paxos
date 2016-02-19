@@ -20,11 +20,10 @@ CREATE SCHEMA pgp_metadata
 	 */
 	CREATE TABLE "host" (
 		group_id text not null,
-		node_name text not null,
-		node_port int not null,
+		connection_string text not null,
 		min_round_num bigint not null,
 		max_round_num bigint,
-		PRIMARY KEY (group_id, node_name, node_port, min_round_num),
+		PRIMARY KEY (group_id, connection_string, min_round_num),
 		FOREIGN KEY (group_id) REFERENCES pgp_metadata.group (group_id)
 	)
 
@@ -801,8 +800,7 @@ $BODY$ LANGUAGE 'plpgsql';
 CREATE FUNCTION paxos_add_host(
 							current_proposer_id text,
 							current_group_id text,
-							hostname text,
-							port int)
+							connection_string text)
 RETURNS bigint
 AS $BODY$
 DECLARE
@@ -822,10 +820,9 @@ BEGIN
 
 		current_round_num := current_round_num + 1;
 
-		proposed_value := format('INSERT INTO pgp_metadata.host VALUES (%s,%s,%s,%s)',
+		proposed_value := format('INSERT INTO pgp_metadata.host VALUES (%s,%s,%s)',
 								 quote_literal(current_group_id),
-								 quote_literal(hostname),
-								 port,
+								 quote_literal(connection_string),
 								 current_round_num+1);
 		SELECT * FROM paxos(
 						current_proposer_id,
@@ -846,8 +843,7 @@ $BODY$ LANGUAGE 'plpgsql';
 CREATE FUNCTION paxos_remove_host(
 							current_proposer_id text,
 							current_group_id text,
-							hostname text,
-							port int)
+							connection_string text)
 RETURNS bigint
 AS $BODY$
 DECLARE
@@ -870,12 +866,10 @@ BEGIN
 		proposed_value := format('UPDATE pgp_metadata.host '||
 								 'SET max_round_num = %s '||
 								 'WHERE group_id = %s '||
-								 'AND node_name = %s '||
-								 'AND node_port = %s',
+								 'AND connection_string = %s '||
 								 current_round_num+1,
 								 quote_literal(current_group_id),
-								 quote_literal(hostname),
-								 port);
+								 quote_literal(connection_string));
 
 		SELECT * FROM paxos(
 						current_proposer_id,
@@ -938,8 +932,7 @@ BEGIN
 
 		CREATE TEMPORARY TABLE IF NOT EXISTS pg_paxos_hosts (
 			connection_name text,
-			node_name text,
-			node_port int,
+			connection_string text,
 			connected boolean
 		);
 
@@ -948,14 +941,14 @@ BEGIN
 	DELETE FROM pg_paxos_hosts;
 
 	INSERT INTO pg_paxos_hosts
-	SELECT format('%s:%s', node_name, node_port) AS connection_name,
-		   node_name, node_port,
+	SELECT connection_string AS connection_name,
+		   connection_string,
 		   false AS connected
 	FROM pgp_metadata.host
 	WHERE group_id = current_group_id
 	  AND min_round_num <= current_round_num
 	  AND (max_round_num IS NULL OR current_round_num <= max_round_num)
-	GROUP BY node_name, node_port;
+	GROUP BY connection_string;
 
 	SELECT count(*) INTO num_hosts FROM pg_paxos_hosts;
 
@@ -974,14 +967,13 @@ RETURNS int
 AS $BODY$
 DECLARE
 	num_open_connections int;
-	connection_string text;
 	host record;
 	connection_open boolean;
 BEGIN
 	num_open_connections := 0;
 
 	FOR host IN
-	SELECT h.connection_name, h.node_name, h.node_port, c.connected
+	SELECT h.connection_name, h.connection_string, c.connected
 	FROM pg_paxos_hosts h LEFT OUTER JOIN
 		 (SELECT unnest AS connected
 		  FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
@@ -1009,25 +1001,20 @@ BEGIN
 
 	/* Otherwise, try to open as many connections as possible (bias towards reads) */
 	FOR host IN
-	SELECT h.connection_name, h.node_name, h.node_port, c.connected
+	SELECT h.connection_name, h.connection_string, c.connected
 	FROM pg_paxos_hosts h LEFT OUTER JOIN
 		 (SELECT unnest AS connected
 		  FROM unnest(dblink_get_connections())) c ON (h.connection_name = c.connected) LOOP
 
 		IF host.connected IS NULL THEN
 			/* Open new connection */
-			connection_string := format('host=%s port=%s dbname=%s connect_timeout=5',
-										host.node_name,
-										host.node_port,
-										current_database());
-
 			BEGIN
-				PERFORM dblink_connect(host.connection_name, connection_string);
+				PERFORM dblink_connect(host.connection_name, host.connection_string);
 				num_open_connections := num_open_connections + 1;
 				UPDATE pg_paxos_hosts SET connected = true
 				WHERE connection_name = host.connection_name;
 			EXCEPTION WHEN OTHERS THEN
-				RAISE WARNING 'failed to connect to %:%', host.node_name, host.node_port;
+				RAISE WARNING 'failed to connect to %', host.connection_string;
 				UPDATE pg_paxos_hosts SET connected = false
 				WHERE connection_name = host.connection_name;
 			END;
@@ -1100,8 +1087,7 @@ $BODY$ LANGUAGE 'plpgsql';
  */
 CREATE FUNCTION paxos_create_group(
 							current_group_id text,
-							founder_hostname text,
-							founder_port int)
+							founder_connection_string text)
 RETURNS void
 AS $BODY$
 BEGIN
@@ -1113,12 +1099,10 @@ BEGIN
 
 	INSERT INTO pgp_metadata.host (
 			group_id,
-			node_name,
-			node_port,
+			connection_string,
 			min_round_num)
 	VALUES (current_group_id,
-			founder_hostname,
-			founder_port,
+			founder_connection_string,
 			1);
 
 	INSERT INTO pgp_metadata.round(
@@ -1135,10 +1119,9 @@ BEGIN
 			0,
 			'pg_paxos initial',
 			'pg_paxos initial',
-			format('INSERT INTO pgp_metadata.host VALUES (%s,%s,%s)',
+			format('INSERT INTO pgp_metadata.host VALUES (%s,%s)',
 				   quote_literal(current_group_id),
-				   quote_literal(founder_hostname),
-				   founder_port),
+				   quote_literal(founder_connection_string)),
 			0,
 			true);
 END;
@@ -1151,34 +1134,32 @@ $BODY$ LANGUAGE plpgsql;
  */
 CREATE FUNCTION paxos_join_group(
 							current_group_id text,
-							existing_hostname text,
-							existing_port int,
-							own_hostname text,
-							own_port int)
+							existing_connection_string text,
+							own_connection_string text)
 RETURNS void
 AS $BODY$
 DECLARE
-	current_proposer_id text := own_hostname||':'||own_port||'/'||txid_current();
-	connection_string text;
+	test_query text;
+	current_proposer_id text := own_connection_string||'/'||txid_current();
 	group_query text;
 	table_query text;
 	replicated_table record;
 	round_query text;
 	host_query text;
 BEGIN
-	/* Get the host table of the remote node, a host table is always correct */
-	connection_string := format('host=%s port=%s dbname=%s connect_timeout=5',
-								existing_hostname,
-								existing_port,
-								current_database());
-
-	PERFORM dblink_connect('paxos_join_group', connection_string);
+	PERFORM dblink_connect('paxos_join_group', existing_connection_string);
 
 	/* Ensure we get a consistent snapshot */
 	PERFORM dblink_exec('paxos_join_group', 'BEGIN');
 	PERFORM dblink_exec('paxos_join_group', 'SET TRANSACTION '||
 											'ISOLATION LEVEL SERIALIZABLE');
 	PERFORM dblink_exec('paxos_join_group', 'SET LOCAL pg_paxos.enabled TO false');
+
+	/* Verify connection string */
+	test_query := format('SELECT * FROM dblink(%s,''SELECT 1'') AS (one int)',
+						 quote_literal(own_connection_string));
+
+	PERFORM * FROM dblink('paxos_join_group', test_query) AS (one int);
 
 	/* Copy the group table from the existing node */
 	group_query := format('SELECT (%s) '||
@@ -1215,9 +1196,11 @@ BEGIN
 	/* Copy the replicated tables from the existing node */
 	FOR replicated_table IN
 	SELECT * FROM pgp_metadata.replicated_tables WHERE group_id = current_group_id LOOP
+		EXECUTE format('TRUNCATE %I', quote_ident(replicated_table.table_oid::text));
 
 		EXECUTE format('INSERT INTO %I SELECT (res).* '||
-					   'FROM dblink(''paxos_join_group'', ''SELECT (%s) FROM %I'') AS (res %I)',
+					   'FROM dblink(''paxos_join_group'','||
+									'''SELECT (%s) FROM %I'') AS (res %I)',
 					   quote_ident(replicated_table.table_oid::text),
 					   table_column_names(replicated_table.table_oid),
 					   quote_ident(replicated_table.table_oid::text),
@@ -1241,13 +1224,11 @@ BEGIN
 	PERFORM paxos_add_host(
 				current_proposer_id,
 				current_group_id,
-				own_hostname,
-				own_port);
+				own_connection_string);
 
 EXCEPTION WHEN OTHERS THEN
-        PERFORM dblink_exec('paxos_join_group', 'ABORT');
         PERFORM dblink_disconnect('paxos_join_group');
-        RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+        RAISE EXCEPTION '%', SQLERRM;
 END;
 $BODY$ LANGUAGE plpgsql;
 
