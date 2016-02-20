@@ -718,6 +718,8 @@ BEGIN
 	FROM pgp_metadata.group
 	WHERE group_id = current_group_id;
 
+	SET LOCAL pg_paxos.enabled TO false;
+
 	WHILE current_round_num < max_round_num LOOP
 
 		current_round_num := current_round_num + 1;

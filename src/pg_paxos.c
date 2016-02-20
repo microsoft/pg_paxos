@@ -57,7 +57,6 @@ static char *DeterminePaxosGroup(List *rangeTableList);
 static Oid ExtractTableOid(Node *node);
 static void PrepareConsistentWrite(char *groupId, const char *sqlQuery);
 static void PrepareConsistentRead(char *groupId);
-static void FinishPaxosTransaction(XactEvent event, void *arg);
 static void PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 								  ProcessUtilityContext context, ParamListInfo params,
 								  DestReceiver *dest, char *completionTag);
@@ -123,8 +122,6 @@ _PG_init(void)
 							 NULL, &ReadConsistencyModel, STRONG_CONSISTENCY,
 							 consistency_model_options, PGC_USERSET, 0, NULL, NULL,
 							 NULL);
-
-	RegisterXactCallback(FinishPaxosTransaction, NULL);
 }
 
 
@@ -158,9 +155,6 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 
 		/* disallow transactions during paxos commands */
 		PreventTransactionChain(topLevel, "paxos commands");
-
-		/* prevent recursive calls to pg_paxos logic */
-		PaxosEnabled = false;
 
 		groupId = DeterminePaxosGroup(rangeTableList);
 
@@ -415,22 +409,6 @@ PrepareConsistentRead(char *groupId)
 			}
 		}
 	}
-}
-
-
-/*
- * FinishPaxosTransaction is called at the end of a transaction and
- * mainly serves to reset the PaxosEnabled flag in case of failure.
- */
-static void
-FinishPaxosTransaction(XactEvent event, void *arg)
-{
-	if (event != XACT_EVENT_COMMIT && event != XACT_EVENT_ABORT)
-	{
-		return;
-	}
-
-	PaxosEnabled = true;
 }
 
 
