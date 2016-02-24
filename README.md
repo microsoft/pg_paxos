@@ -77,7 +77,7 @@ To set up Paxos group with a replicated table, first create the table on all the
         y int
     );
 
-Then, on one of the nodes, call paxos_create_group to create a named Paxos group with the node itself (defined as a connection string) as its sole member, and call paxos_replicate_table to replicate a table within a group:
+Then, on one of the nodes, call paxos_create_group to create a named Paxos group with the node itself (defined as a connection string using its external address) as its sole member, and call paxos_replicate_table to replicate a table within a group:
 
     SELECT paxos_create_group('mokka', 'host=10.0.0.1');
     SELECT paxos_replicate_table('mokka', 'coordinates');
