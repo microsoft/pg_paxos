@@ -267,9 +267,16 @@ DeterminePaxosGroup(List *rangeTableList)
 
 	foreach(rangeTableCell, rangeTableList)
 	{
-		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
-		char *tableGroupId = PaxosTableGroup(rangeTableOid);
+		char *tableGroupId = NULL;
 
+		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
+		if (rangeTableOid == InvalidOid)
+		{
+			/* range table entry for something other than a relation */
+			continue;
+		}
+
+		tableGroupId = PaxosTableGroup(rangeTableOid);
 		if (tableGroupId == NULL)
 		{
 			char *relationName = get_rel_name(rangeTableOid);
