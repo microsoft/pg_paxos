@@ -37,7 +37,10 @@
 #include "nodes/nodes.h"
 #include "nodes/params.h"
 #include "nodes/parsenodes.h"
+#include "nodes/plannodes.h"
 #include "nodes/pg_list.h"
+#include "optimizer/clauses.h"
+#include "optimizer/planner.h"
 #include "tcop/dest.h"
 #include "tcop/utility.h"
 #include "utils/lsyscache.h"
@@ -50,10 +53,14 @@ PG_MODULE_MAGIC;
 
 
 /* executor functions forward declarations */
+static PlannedStmt * PgPaxosPlanner(Query *parse, int cursorOptions,
+									ParamListInfo boundParams);
+static void ErrorIfQueryNotSupported(Query *queryTree);
 static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
 static bool HasPaxosTable(List *rangeTableList);
 static bool IsPgPaxosActive(void);
 static char *DeterminePaxosGroup(List *rangeTableList);
+static bool ExtractRangeTableEntryWalker(Node *node, List **rangeTableList);
 static Oid ExtractTableOid(Node *node);
 static void PrepareConsistentWrite(char *groupId, const char *sqlQuery);
 static void PrepareConsistentRead(char *groupId);
@@ -88,6 +95,7 @@ char *PaxosNodeId = NULL;
 static int ReadConsistencyModel = STRONG_CONSISTENCY;
 
 /* saved hook values in case of unload */
+static planner_hook_type PreviousPlannerHook = NULL;
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
@@ -101,6 +109,9 @@ static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 void
 _PG_init(void)
 {
+	PreviousPlannerHook = planner_hook;
+	planner_hook = PgPaxosPlanner;
+
 	PreviousExecutorStartHook = ExecutorStart_hook;
 	ExecutorStart_hook = PgPaxosExecutorStart;
 
@@ -134,6 +145,158 @@ _PG_fini(void)
 {
 	ProcessUtility_hook = PreviousProcessUtilityHook;
 	ExecutorStart_hook = PreviousExecutorStartHook;
+}
+
+
+/*
+ * PgPaxosPlanner implements custom planning logic for queries involving
+ * replicated tables.
+ */
+static PlannedStmt *
+PgPaxosPlanner(Query *query, int cursorOptions, ParamListInfo boundParams)
+{
+	PlannedStmt *plannedStatement = NULL;
+	List *rangeTableList = NIL;
+
+	ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
+
+	if (IsPgPaxosActive() && HasPaxosTable(rangeTableList))
+	{
+		Query *paxosQuery = copyObject(query);
+
+		/* call standard planner first to have Query transformations performed */
+		plannedStatement = standard_planner(paxosQuery, cursorOptions,
+											boundParams);
+
+		ErrorIfQueryNotSupported(paxosQuery);
+	}
+
+	if (PreviousPlannerHook != NULL)
+	{
+		plannedStatement = PreviousPlannerHook(query, cursorOptions, boundParams);
+	}
+	else
+	{
+		plannedStatement = standard_planner(query, cursorOptions, boundParams);
+	}
+
+	return plannedStatement;
+}
+
+
+/*
+ * IsPgPaxosActive returns whether pg_paxos should intercept queries.
+ */
+static bool
+IsPgPaxosActive(void)
+{
+	bool missingOK = true;
+	Oid extensionOid = InvalidOid;
+	Oid metadataNamespaceOid = InvalidOid;
+	Oid tableMetadataTableOid = InvalidOid;
+
+	if (!PaxosEnabled)
+	{
+		return false;
+	}
+
+	extensionOid = get_extension_oid(PG_PAXOS_EXTENSION_NAME, missingOK);
+	if (extensionOid == InvalidOid)
+	{
+		return false;
+	}
+
+	metadataNamespaceOid = get_namespace_oid("pgp_metadata", true);
+	if (metadataNamespaceOid == InvalidOid)
+	{
+		return false;
+	}
+
+	tableMetadataTableOid = get_relname_relid("replicated_tables", metadataNamespaceOid);
+	if (tableMetadataTableOid == InvalidOid)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * ExtractRangeTableEntryWalker walks over a query tree, and finds all range
+ * table entries. For recursing into the query tree, this function uses the
+ * query tree walker since the expression tree walker doesn't recurse into
+ * sub-queries.
+ */
+static bool
+ExtractRangeTableEntryWalker(Node *node, List **rangeTableList)
+{
+	bool walkIsComplete = false;
+	if (node == NULL)
+	{
+		return false;
+	}
+
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rangeTable = (RangeTblEntry *) node;
+		(*rangeTableList) = lappend(*rangeTableList, rangeTable);
+	}
+	else if (IsA(node, Query))
+	{
+		walkIsComplete = query_tree_walker((Query *) node, ExtractRangeTableEntryWalker,
+										   rangeTableList, QTW_EXAMINE_RTES);
+	}
+	else
+	{
+		walkIsComplete = expression_tree_walker(node, ExtractRangeTableEntryWalker,
+												rangeTableList);
+	}
+
+	return walkIsComplete;
+}
+
+
+/*
+ * HasPaxosTable returns whether the given list of range tables contains
+ * a Paxos table.
+ */
+static bool
+HasPaxosTable(List *rangeTableList)
+{
+	ListCell *rangeTableCell = NULL;
+
+	if (rangeTableList == NIL)
+	{
+		return false;
+	}
+
+	foreach(rangeTableCell, rangeTableList)
+	{
+		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
+		if (IsPaxosTable(rangeTableOid))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/*
+ * ErrorIfQueryNotSupported checks if the query contains unsupported features,
+ * and errors out if it does.
+ */
+static void
+ErrorIfQueryNotSupported(Query *queryTree)
+{
+	if (contain_mutable_functions((Node *) queryTree))
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot plan queries on replicated tables "
+							   "containing mutable functions")));
+	}
 }
 
 
@@ -182,78 +345,6 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 	}
 }
 
-
-/*
- * HasPaxosTable returns whether the given list of range tables contains
- * a Paxos table.
- */
-static bool
-HasPaxosTable(List *rangeTableList)
-{
-	ListCell *rangeTableCell = NULL;
-
-	/* if the extension isn't created, it is never a Paxos query */
-	bool missingOK = true;
-	Oid extensionOid = get_extension_oid(PG_PAXOS_EXTENSION_NAME, missingOK);
-	if (extensionOid == InvalidOid)
-	{
-		return false;
-	}
-
-	if (rangeTableList == NIL)
-	{
-		return false;
-	}
-
-	foreach(rangeTableCell, rangeTableList)
-	{
-		Oid rangeTableOid = ExtractTableOid((Node *) lfirst(rangeTableCell));
-		if (IsPaxosTable(rangeTableOid))
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-
-
-/*
- * IsPgPaxosActive returns whether pg_paxos should intercept queries.
- */
-static bool
-IsPgPaxosActive(void)
-{
-	bool missingOK = true;
-	Oid extensionOid = InvalidOid;
-	Oid metadataNamespaceOid = InvalidOid;
-	Oid tableMetadataTableOid = InvalidOid;
-
-	if (!PaxosEnabled)
-	{
-		return false;
-	}
-
-	extensionOid = get_extension_oid(PG_PAXOS_EXTENSION_NAME, missingOK);
-	if (extensionOid == InvalidOid)
-	{
-		return false;
-	}
-
-	metadataNamespaceOid = get_namespace_oid("pgp_metadata", true);
-	if (metadataNamespaceOid == InvalidOid)
-	{
-		return false;
-	}
-
-	tableMetadataTableOid = get_relname_relid("replicated_tables", metadataNamespaceOid);
-	if (tableMetadataTableOid == InvalidOid)
-	{
-		return false;
-	}
-
-	return true;
-}
 
 /*
  * DeterminePaxosGroup determines the paxos group for the given list of relations.
