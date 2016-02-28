@@ -451,7 +451,7 @@ BEGIN
 			PERFORM pg_sleep(1);
 
 			/* Make sure current_proposal_num is higher than any other known proposal */
-			SELECT greatest(max(proposal_num), current_proposal_num) + 1
+			SELECT greatest(max(min_proposal_num), current_proposal_num) + 1
 			INTO current_proposal_num
 			FROM accept_responses;
 
