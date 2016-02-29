@@ -94,6 +94,9 @@ char *PaxosNodeId = NULL;
 /* consistency model for reads */
 static int ReadConsistencyModel = STRONG_CONSISTENCY;
 
+/* whether to allow mutable functions */
+static bool AllowMutableFunctions = false;
+
 /* saved hook values in case of unload */
 static planner_hook_type PreviousPlannerHook = NULL;
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
@@ -133,6 +136,11 @@ _PG_init(void)
 							 NULL, &ReadConsistencyModel, STRONG_CONSISTENCY,
 							 consistency_model_options, PGC_USERSET, 0, NULL, NULL,
 							 NULL);
+
+	DefineCustomBoolVariable("pg_paxos.allow_mutable_functions",
+							 "If enabled, mutable functions in queries are allowed",
+							 NULL, &AllowMutableFunctions, false, PGC_USERSET,
+							 0, NULL, NULL, NULL);
 }
 
 
@@ -156,19 +164,30 @@ static PlannedStmt *
 PgPaxosPlanner(Query *query, int cursorOptions, ParamListInfo boundParams)
 {
 	PlannedStmt *plannedStatement = NULL;
+	CmdType commandType = query->commandType;
 	List *rangeTableList = NIL;
+	bool isModificationQuery = false;
 
-	ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
-
-	if (IsPgPaxosActive() && HasPaxosTable(rangeTableList))
+	if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
+		commandType == CMD_DELETE)
 	{
-		Query *paxosQuery = copyObject(query);
+		isModificationQuery = true;
+	}
 
-		/* call standard planner first to have Query transformations performed */
-		plannedStatement = standard_planner(paxosQuery, cursorOptions,
-											boundParams);
+	if (IsPgPaxosActive() && isModificationQuery)
+	{
+		ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
 
-		ErrorIfQueryNotSupported(paxosQuery);
+		if (HasPaxosTable(rangeTableList))
+		{
+			/* Build the DML query to log */
+			Query *paxosQuery = copyObject(query);
+
+			/* call standard planner first to have Query transformations performed */
+			plannedStatement = standard_planner(paxosQuery, cursorOptions, boundParams);
+
+			ErrorIfQueryNotSupported(paxosQuery);
+		}
 	}
 
 	if (PreviousPlannerHook != NULL)
@@ -291,11 +310,13 @@ HasPaxosTable(List *rangeTableList)
 static void
 ErrorIfQueryNotSupported(Query *queryTree)
 {
-	if (contain_mutable_functions((Node *) queryTree))
+	if (!AllowMutableFunctions && contain_mutable_functions((Node *) queryTree))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("cannot plan queries on replicated tables "
-							   "containing mutable functions")));
+							   "containing mutable functions"),
+						errhint("To allow mutable functions, set "
+								"pg_paxos.allow_mutable_functions to on")));
 	}
 }
 
