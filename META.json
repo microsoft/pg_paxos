@@ -2,7 +2,7 @@
     "name": "pg_paxos",
     "abstract": "Paxos functions for PostgreSQL",
     "description": "Adds functions implementing the Paxos consensus algorithm to PostgreSQL",
-    "version": "0.1",
+    "version": "0.2",
     "maintainer": "\"Marco Slot\" <marco@citusdata.com>",
     "license": {
 		"PostgreSQL": "http://www.postgresql.org/about/licence"
@@ -17,9 +17,9 @@
     "provides": {
         "pg_paxos": {
             "abstract": "Paxos functions for PostgreSQL",
-            "file": "sql/pg_paxos--0.1.sql",
+            "file": "sql/pg_paxos--0.2.sql",
             "docfile": "README.md",
-            "version": "0.1"
+            "version": "0.2"
         }
     },
     "release_status": "stable",

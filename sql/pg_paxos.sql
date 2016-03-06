@@ -1085,6 +1085,15 @@ $BODY$ LANGUAGE 'plpgsql';
 
 
 /*
+ * paxos_execute executes a query locally, by-passing the Paxos query logging logic.
+ */
+CREATE FUNCTION paxos_execute(INTERNAL)
+RETURNS void
+LANGUAGE C
+AS 'MODULE_PATHNAME', $$paxos_execute$$;
+
+
+/*
  * paxos_create_group creates a new Paxos group with a single member.
  */
 CREATE FUNCTION paxos_create_group(

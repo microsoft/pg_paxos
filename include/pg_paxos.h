@@ -13,6 +13,9 @@
 #ifndef PG_PAXOS_H
 #define PG_PAXOS_H
 
+#include "lib/stringinfo.h"
+#include "nodes/parsenodes.h"
+
 /* extension name used to determine if extension has been created */
 #define PG_PAXOS_EXTENSION_NAME "pg_paxos"
 #define PG_PAXOS_METADATA_SCHEMA_NAME "pgp_metadata"
@@ -31,5 +34,6 @@ extern void _PG_fini(void);
 
 /* function declarations for pg_paxos utility functions */
 extern char *GenerateProposerId(void);
+extern void deparse_query(Query *query, StringInfo buffer);
 
 #endif /* PG_PAXOS_H */

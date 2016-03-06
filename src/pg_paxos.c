@@ -30,6 +30,7 @@
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_type.h"
 #include "commands/extension.h"
 #include "lib/stringinfo.h"
 #include "nodes/memnodes.h"
@@ -39,10 +40,13 @@
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
 #include "nodes/pg_list.h"
+#include "nodes/print.h"
 #include "optimizer/clauses.h"
 #include "optimizer/planner.h"
+#include "parser/parse_func.h"
 #include "tcop/dest.h"
 #include "tcop/utility.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
@@ -51,16 +55,28 @@
 /* declarations for dynamic loading */
 PG_MODULE_MAGIC;
 
+/* exports for SQL callable functions */
+PG_FUNCTION_INFO_V1(paxos_execute);
 
-/* executor functions forward declarations */
+
+/* Paxos planner function declarations */
 static PlannedStmt * PgPaxosPlanner(Query *parse, int cursorOptions,
 									ParamListInfo boundParams);
-static void ErrorIfQueryNotSupported(Query *queryTree);
-static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
-static bool HasPaxosTable(List *rangeTableList);
+static PlannedStmt * NextPlannerHook(Query *query, int cursorOptions,
+									 ParamListInfo boundParams);
 static bool IsPgPaxosActive(void);
-static char *DeterminePaxosGroup(List *rangeTableList);
 static bool ExtractRangeTableEntryWalker(Node *node, List **rangeTableList);
+static bool HasPaxosTable(List *rangeTableList);
+static bool FindModificationQueryWalker(Node *node, bool *isModificationQuery);
+static void ErrorIfQueryNotSupported(Query *queryTree);
+static Plan * CreatePaxosExecutePlan(char *queryString);
+static Oid PaxosExecuteFuncId(void);
+static char * GetPaxosQueryString(PlannedStmt *plan);
+
+/* Paxos executor function declarations */
+static void PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags);
+static void NextExecutorStartHook(QueryDesc *queryDesc, int eflags);
+static char *DeterminePaxosGroup(List *rangeTableList);
 static Oid ExtractTableOid(Node *node);
 static void PrepareConsistentWrite(char *groupId, const char *sqlQuery);
 static void PrepareConsistentRead(char *groupId);
@@ -153,6 +169,7 @@ _PG_fini(void)
 {
 	ProcessUtility_hook = PreviousProcessUtilityHook;
 	ExecutorStart_hook = PreviousExecutorStartHook;
+	planner_hook = PreviousPlannerHook;
 }
 
 
@@ -163,43 +180,72 @@ _PG_fini(void)
 static PlannedStmt *
 PgPaxosPlanner(Query *query, int cursorOptions, ParamListInfo boundParams)
 {
-	PlannedStmt *plannedStatement = NULL;
-	CmdType commandType = query->commandType;
-	List *rangeTableList = NIL;
 	bool isModificationQuery = false;
+	List *rangeTableList = NIL;
 
-	if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
-		commandType == CMD_DELETE)
+	if (!IsPgPaxosActive())
 	{
-		isModificationQuery = true;
+		return NextPlannerHook(query, cursorOptions, boundParams);
 	}
 
-	if (IsPgPaxosActive() && isModificationQuery)
+	FindModificationQueryWalker((Node *) query, &isModificationQuery);
+
+	if (!isModificationQuery)
 	{
-		ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
-
-		if (HasPaxosTable(rangeTableList))
-		{
-			/* Build the DML query to log */
-			Query *paxosQuery = copyObject(query);
-
-			/* call standard planner first to have Query transformations performed */
-			plannedStatement = standard_planner(paxosQuery, cursorOptions, boundParams);
-
-			ErrorIfQueryNotSupported(paxosQuery);
-		}
+		return NextPlannerHook(query, cursorOptions, boundParams);
 	}
 
-	if (PreviousPlannerHook != NULL)
+	ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
+
+	if (HasPaxosTable(rangeTableList))
 	{
-		plannedStatement = PreviousPlannerHook(query, cursorOptions, boundParams);
+		PlannedStmt *plannedStatement = NULL;
+		Plan *paxosExecutePlan = NULL;
+
+		/* Build the DML query to log */
+		Query *paxosQuery = copyObject(query);
+		StringInfo queryString = makeStringInfo();
+
+		/* call standard planner first to have Query transformations performed */
+		plannedStatement = standard_planner(paxosQuery, cursorOptions, boundParams);
+
+		ErrorIfQueryNotSupported(paxosQuery);
+
+		/* get the transformed query string */
+		deparse_query(paxosQuery, queryString);
+
+		/* define the plan as a call to paxos_execute(queryString) */
+		paxosExecutePlan = CreatePaxosExecutePlan(queryString->data);
+
+		/* PortalStart will use the targetlist from the plan */
+		paxosExecutePlan->targetlist = plannedStatement->planTree->targetlist;
+
+		plannedStatement->planTree = paxosExecutePlan;
+
+		return plannedStatement;
 	}
 	else
 	{
-		plannedStatement = standard_planner(query, cursorOptions, boundParams);
+		return NextPlannerHook(query, cursorOptions, boundParams);
 	}
+}
 
-	return plannedStatement;
+/*
+ * NextPlannerHook simply encapsulates the common logic of calling the next
+ * planner hook in the chain or the standard planner start hook if no other
+ * hooks are present.
+ */
+static PlannedStmt *
+NextPlannerHook(Query *query, int cursorOptions, ParamListInfo boundParams)
+{
+	if (PreviousPlannerHook != NULL)
+	{
+		return PreviousPlannerHook(query, cursorOptions, boundParams);
+	}
+	else
+	{
+		return standard_planner(query, cursorOptions, boundParams);
+	}
 }
 
 
@@ -259,6 +305,7 @@ ExtractRangeTableEntryWalker(Node *node, List **rangeTableList)
 	if (IsA(node, RangeTblEntry))
 	{
 		RangeTblEntry *rangeTable = (RangeTblEntry *) node;
+
 		(*rangeTableList) = lappend(*rangeTableList, rangeTable);
 	}
 	else if (IsA(node, Query))
@@ -277,6 +324,46 @@ ExtractRangeTableEntryWalker(Node *node, List **rangeTableList)
 
 
 /*
+ * FidModificationQuery walks a query tree to find a modification query.
+ */
+static bool
+FindModificationQueryWalker(Node *node, bool *isModificationQuery)
+{
+	bool walkIsComplete = false;
+	if (node == NULL)
+	{
+		return false;
+	}
+
+	if (IsA(node, Query))
+	{
+		Query *query = (Query *) node;
+		CmdType commandType = query->commandType;
+
+		if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
+			commandType == CMD_DELETE)
+		{
+			*isModificationQuery = true;
+			walkIsComplete = true;
+		}
+		else
+		{
+			walkIsComplete = query_tree_walker(query,
+											   FindModificationQueryWalker,
+											   isModificationQuery, 0);
+		}
+	}
+	else
+	{
+		walkIsComplete = expression_tree_walker(node, FindModificationQueryWalker,
+												isModificationQuery);
+	}
+
+	return walkIsComplete;
+}
+
+
+/*
  * HasPaxosTable returns whether the given list of range tables contains
  * a Paxos table.
  */
@@ -284,11 +371,6 @@ static bool
 HasPaxosTable(List *rangeTableList)
 {
 	ListCell *rangeTableCell = NULL;
-
-	if (rangeTableList == NIL)
-	{
-		return false;
-	}
 
 	foreach(rangeTableCell, rangeTableList)
 	{
@@ -313,11 +395,126 @@ ErrorIfQueryNotSupported(Query *queryTree)
 	if (!AllowMutableFunctions && contain_mutable_functions((Node *) queryTree))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("cannot plan queries on replicated tables "
-							   "containing mutable functions"),
+						errmsg("queries containing mutable functions may "
+							   "load to inconsistencies"),
 						errhint("To allow mutable functions, set "
 								"pg_paxos.allow_mutable_functions to on")));
 	}
+}
+
+
+/*
+ * CreatePaxosExecutePlan creates a plan to call paxos_execute(queryString),
+ * which is intercepted by the executor hook, which logs the query and executes
+ * it using the regular planner.
+ */
+static Plan *
+CreatePaxosExecutePlan(char *queryString)
+{
+	FunctionScan *execFunctionScan = NULL;
+	RangeTblFunction *execFunction = NULL;
+	FuncExpr *execFuncExpr = NULL;
+	Const *queryData = NULL;
+
+	/* store the query string as a cstring */
+	queryData = makeNode(Const);
+	queryData->consttype = CSTRINGOID;
+	queryData->constlen = -2;
+	queryData->constvalue = CStringGetDatum(queryString);
+	queryData->constbyval = false;
+	queryData->constisnull = queryString == NULL;
+	queryData->location = -1;
+
+	execFuncExpr = makeNode(FuncExpr);
+	execFuncExpr->funcid = PaxosExecuteFuncId();
+	execFuncExpr->funcretset = true;
+	execFuncExpr->funcresulttype = VOIDOID;
+	execFuncExpr->location = -1;
+	execFuncExpr->args = list_make1(queryData);
+
+	execFunction = makeNode(RangeTblFunction);
+	execFunction->funcexpr = (Node *) execFuncExpr;
+
+	execFunctionScan = makeNode(FunctionScan);
+	execFunctionScan->functions = lappend(execFunctionScan->functions, execFunction);
+
+	return (Plan *) execFunctionScan;
+}
+
+
+/*
+ * PaxosExecuteFuncId returns the OID of the paxos_execute function.
+ */
+static Oid
+PaxosExecuteFuncId(void)
+{
+	static Oid cachedOid = 0;
+	List *nameList = NIL;
+	Oid paramOids[1] = { INTERNALOID };
+
+	if (cachedOid == InvalidOid)
+	{
+		nameList = list_make2(makeString("public"),
+							  makeString("paxos_execute"));
+		cachedOid = LookupFuncName(nameList, 1, paramOids, false);
+	}
+
+	return cachedOid;
+}
+
+
+/*
+ * GetPaxosQueryString returns NULL if the plan is not a Paxos execute plan,
+ * or the original query string.
+ */
+static char *
+GetPaxosQueryString(PlannedStmt *plan)
+{
+	FunctionScan *execFunctionScan = NULL;
+	RangeTblFunction *execFunction = NULL;
+	FuncExpr *execFuncExpr = NULL;
+	Const *queryData = NULL;
+	char *queryString = NULL;
+
+	if (!IsA(plan->planTree, FunctionScan))
+	{
+		return NULL;
+	}
+
+	execFunctionScan = (FunctionScan *) plan->planTree;
+
+	if (list_length(execFunctionScan->functions) != 1)
+	{
+		return NULL;
+	}
+
+	execFunction = linitial(execFunctionScan->functions);
+
+	if (!IsA(execFunction->funcexpr, FuncExpr))
+	{
+		return NULL;
+	}
+
+	execFuncExpr = (FuncExpr *) execFunction->funcexpr;
+
+	if (execFuncExpr->funcid != PaxosExecuteFuncId())
+	{
+		return NULL;
+	}
+
+	if (list_length(execFuncExpr->args) != 1)
+	{
+		ereport(ERROR, (errmsg("unexpected number of function arguments to "
+							   "paxos_execute")));
+	}
+
+	queryData = (Const *) linitial(execFuncExpr->args);
+	Assert(IsA(queryData, Const));
+	Assert(queryData->consttype == CSTRINGOID);
+
+	queryString = DatumGetCString(queryData->constvalue);
+
+	return queryString;
 }
 
 
@@ -329,32 +526,72 @@ PgPaxosExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
 	List *rangeTableList = plannedStmt->rtable;
-	CmdType commandType = queryDesc->operation;
+	char *paxosQueryString = NULL;
 
-	if (IsPgPaxosActive() && HasPaxosTable(rangeTableList))
+	if (!IsPgPaxosActive() || (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0)
 	{
-		char *sqlQuery = (char *) queryDesc->sourceText;
+		NextExecutorStartHook(queryDesc, eflags);
+		return;
+	}
+
+	paxosQueryString = GetPaxosQueryString(plannedStmt);
+	if (paxosQueryString != NULL)
+	{
+		/* paxos write query */
 		char *groupId = NULL;
-		bool topLevel = true;
+		bool isTopLevel = true;
+		List *parseTreeList = NIL;
+		Node *parseTreeNode = NULL;
+		List *queryTreeList = NIL;
+		Query *query = NULL;
 
 		/* disallow transactions during paxos commands */
-		PreventTransactionChain(topLevel, "paxos commands");
+		PreventTransactionChain(isTopLevel, "paxos commands");
 
 		groupId = DeterminePaxosGroup(rangeTableList);
+		PrepareConsistentWrite(groupId, paxosQueryString);
 
-		if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
-			commandType == CMD_DELETE)
+		queryDesc->snapshot->curcid = GetCurrentCommandId(false);
+
+		elog(DEBUG1, "Executing: %s %d", paxosQueryString, plannedStmt->hasReturning);
+
+		/* replan the query */
+		parseTreeList = pg_parse_query(paxosQueryString);
+
+		if (list_length(parseTreeList) != 1)
 		{
-			PrepareConsistentWrite(groupId, sqlQuery);
+			ereport(ERROR, (errmsg("can only execute single-statement queries on "
+								   "replicated tables")));
 		}
-		else
-		{
-			PrepareConsistentRead(groupId);
-		}
+
+		parseTreeNode = (Node *) linitial(parseTreeList);
+		queryTreeList = pg_analyze_and_rewrite(parseTreeNode, paxosQueryString, NULL, 0);
+		query = (Query *) linitial(queryTreeList);
+		queryDesc->plannedstmt = pg_plan_query(query, 0, queryDesc->params);
+	}
+	else if (HasPaxosTable(rangeTableList))
+	{
+		/* paxos read query */
+		char *groupId = NULL;
+
+		groupId = DeterminePaxosGroup(rangeTableList);
+		PrepareConsistentRead(groupId);
 
 		queryDesc->snapshot->curcid = GetCurrentCommandId(false);
 	}
 
+	NextExecutorStartHook(queryDesc, eflags);
+}
+
+
+/*
+ * NextExecutorStartHook simply encapsulates the common logic of calling the
+ * next executor start hook in the chain or the standard executor start hook
+ * if no other hooks are present.
+ */
+static void
+NextExecutorStartHook(QueryDesc *queryDesc, int eflags)
+{
 	/* call into the standard executor start, or hook if set */
 	if (PreviousExecutorStartHook != NULL)
 	{
@@ -627,4 +864,15 @@ PgPaxosProcessUtility(Node *parsetree, const char *queryString,
 		standard_ProcessUtility(parsetree, queryString, context,
 								params, dest, completionTag);
 	}
+}
+
+
+/*
+ * paxos_execute is a placeholder function to store a query string in
+ * in plain postgres node trees.
+ */
+Datum
+paxos_execute(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_NULL();
 }
