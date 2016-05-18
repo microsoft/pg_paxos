@@ -10,6 +10,7 @@ CREATE SCHEMA pgp_metadata
 	CREATE TABLE "group" (
 		group_id text not null,
 		last_applied_round bigint not null default -1,
+		own_connection_string text not null,
 		PRIMARY KEY (group_id)
 	)
 
@@ -840,7 +841,7 @@ $BODY$ LANGUAGE 'plpgsql';
 
 /*
  * paxos_remove_host appends a command that removes the given host from the Paxos group
- * starting from the round in which this command is logged + 1.
+ * starting from the round after the one in which this command is logged.
  */
 CREATE FUNCTION paxos_remove_host(
 							current_proposer_id text,
@@ -868,8 +869,8 @@ BEGIN
 		proposed_value := format('UPDATE pgp_metadata.host '||
 								 'SET max_round_num = %s '||
 								 'WHERE group_id = %s '||
-								 'AND connection_string = %s '||
-								 current_round_num+1,
+								 'AND connection_string = %s ',
+								 current_round_num,
 								 quote_literal(current_group_id),
 								 quote_literal(connection_string));
 
@@ -1104,9 +1105,11 @@ AS $BODY$
 BEGIN
 	INSERT INTO pgp_metadata.group (
 			group_id,
-			last_applied_round)
+			last_applied_round,
+			own_connection_string)
 	VALUES (current_group_id,
-			0);
+			0,
+			founder_connection_string);
 
 	INSERT INTO pgp_metadata.host (
 			group_id,
@@ -1151,7 +1154,7 @@ RETURNS void
 AS $BODY$
 DECLARE
 	test_query text;
-	current_proposer_id text := own_connection_string||'/'||txid_current();
+	current_proposer_id text := 'join/'||own_connection_string||'/'||txid_current();
 	group_query text;
 	table_query text;
 	replicated_table record;
@@ -1179,7 +1182,8 @@ BEGIN
 						  table_column_names('pgp_metadata.group'),
 						  quote_literal(current_group_id));
 
-	INSERT INTO pgp_metadata.group SELECT (res).*
+	INSERT INTO pgp_metadata.group
+	SELECT (res).group_id, (res).last_applied_round, own_connection_string
 	FROM dblink('paxos_join_group', group_query) AS (res pgp_metadata.group);
 
 	/* Copy the hosts table from the existing node */
@@ -1240,6 +1244,37 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
         PERFORM dblink_disconnect('paxos_join_group');
         RAISE EXCEPTION '%', SQLERRM;
+END;
+$BODY$ LANGUAGE plpgsql;
+
+
+/*
+ * paxos_leave_group removes the node on which the function is called from a Paxos
+ * group, leaving the replicated tables in their final state at the moment this
+ * function is called.
+ */
+CREATE FUNCTION paxos_leave_group(
+							current_group_id text)
+RETURNS void
+AS $BODY$
+DECLARE
+	connection_string text;
+	current_proposer_id text;
+BEGIN
+	SELECT own_connection_string INTO connection_string
+	FROM pgp_metadata.group WHERE group_id = current_group_id;
+
+	current_proposer_id := 'leave/'||connection_string||'/'||txid_current();
+
+	PERFORM paxos_remove_host(
+				current_proposer_id,
+				current_group_id,
+				connection_string);
+
+	DELETE FROM pgp_metadata.replicated_tables WHERE group_id = current_group_id;
+	DELETE FROM pgp_metadata.host WHERE group_id = current_group_id;
+	DELETE FROM pgp_metadata.round WHERE group_id = current_group_id;
+	DELETE FROM pgp_metadata.group WHERE group_id = current_group_id;
 END;
 $BODY$ LANGUAGE plpgsql;
 

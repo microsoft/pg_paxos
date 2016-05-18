@@ -265,6 +265,11 @@ IsPgPaxosActive(void)
 		return false;
 	}
 
+	if (!IsTransactionState())
+	{
+		return false;
+	}
+
 	extensionOid = get_extension_oid(PG_PAXOS_EXTENSION_NAME, missingOK);
 	if (extensionOid == InvalidOid)
 	{
