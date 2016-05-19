@@ -1150,7 +1150,7 @@ CREATE FUNCTION paxos_join_group(
 							current_group_id text,
 							existing_connection_string text,
 							own_connection_string text)
-RETURNS void
+RETURNS bigint
 AS $BODY$
 DECLARE
 	test_query text;
@@ -1160,6 +1160,7 @@ DECLARE
 	replicated_table record;
 	round_query text;
 	host_query text;
+	joined_round_number bigint;
 BEGIN
 	PERFORM dblink_connect('paxos_join_group', existing_connection_string);
 
@@ -1236,10 +1237,19 @@ BEGIN
 	PERFORM dblink_disconnect('paxos_join_group');
 
 	/* Start actively participating in the Paxos group */
-	PERFORM paxos_add_host(
+	SELECT paxos_add_host(
 				current_proposer_id,
 				current_group_id,
-				own_connection_string);
+				own_connection_string)
+	INTO joined_round_number;
+
+	/* Sync the log to include the node in the hosts table */
+	PERFORM paxos_apply_log(
+				current_proposer_id,
+				current_group_id,
+				joined_round_number);
+
+	RETURN joined_round_number;
 
 EXCEPTION WHEN OTHERS THEN
         PERFORM dblink_disconnect('paxos_join_group');
